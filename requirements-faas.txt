@@ -1,6 +1,25 @@
--r requirements.txt
+# FaaS-only additions for the kau/pytorch-master CUDA image.
+#
+# Do not add torch, torchvision, torchaudio, triton, transformers, accelerate,
+# numpy, scipy, scikit-learn, Pillow, or opencv here. The FaaS base image
+# provides a mutually compatible CUDA stack for those packages. Keeping them
+# out of this file prevents pip from replacing the provider's PyTorch build.
 
-# Source/transfer classifier evaluation
+# FLUX.2 Klein/KV generation and Gemma/Qwen tokenizer support. Diffusers is
+# pinned because 0.39+ requires safetensors>=0.8, while the provider image has
+# a compatible safetensors 0.7 build that should remain untouched.
+diffusers==0.37.1
+sentencepiece>=0.2,<1
+protobuf>=5,<7
+einops>=0.8,<1
+
+# Attack configuration and progress utilities.
+PyYAML>=6,<7
+tqdm>=4.66,<5
+natsort>=8.4,<9
+setproctitle>=1.3,<2
+
+# Source and transfer classifier evaluation.
+timm>=1.0,<2
 adversarial-robustness-toolbox>=1.18,<2
 pytorch-fid>=0.3,<1
-einops>=0.8,<1

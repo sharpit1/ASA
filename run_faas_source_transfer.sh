@@ -24,10 +24,12 @@ MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 RESULT_DIR="${RESULT_DIR:-results}"
 RUN_NAME="${RUN_NAME:-faas_${SOURCE_MODEL}_$(date +%Y%m%d_%H%M%S)}"
-INSTALL_DEPS="${INSTALL_DEPS:-0}"
+INSTALL_DEPS="${INSTALL_DEPS:-1}"
 FAAS_DRY_RUN="${FAAS_DRY_RUN:-0}"
 NPZ_BATCH_SIZE="${NPZ_BATCH_SIZE:-64}"
 HF_CACHE_ROOT="${HF_CACHE_ROOT:-$ROOT_DIR/.cache/huggingface}"
+TORCH_HOME="${TORCH_HOME:-$ROOT_DIR/ckpt/torch_hub}"
+BASE_CONSTRAINTS_PATH=""
 
 make_absolute() {
   local value="$1"
@@ -43,23 +45,85 @@ DATASET_ROOT="$(make_absolute "$DATASET_ROOT")"
 OUTPUT_ROOT="$(make_absolute "$OUTPUT_ROOT")"
 RESULT_DIR="$(make_absolute "$RESULT_DIR")"
 HF_CACHE_ROOT="$(make_absolute "$HF_CACHE_ROOT")"
+TORCH_HOME="$(make_absolute "$TORCH_HOME")"
 RUN_ROOT="$OUTPUT_ROOT/$DATASET_NAME/$SOURCE_MODEL/$RUN_NAME"
 RESULT_TXT="$RESULT_DIR/$RUN_NAME.txt"
 
-mkdir -p "$RESULT_DIR"
+HF_HOME="${HF_HOME:-$HF_CACHE_ROOT}"
+HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_CACHE_ROOT/hub}"
+TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_CACHE_ROOT/transformers}"
+export HF_HOME HF_HUB_CACHE TRANSFORMERS_CACHE TORCH_HOME
+
+mkdir -p "$RESULT_DIR" "$HF_HOME" "$HF_HUB_CACHE" "$TRANSFORMERS_CACHE" "$TORCH_HOME"
 exec > >(tee "$RESULT_TXT") 2>&1
 
 on_exit() {
   local rc="$?"
+  if [[ -n "$BASE_CONSTRAINTS_PATH" && -f "$BASE_CONSTRAINTS_PATH" ]]; then
+    rm -f "$BASE_CONSTRAINTS_PATH"
+  fi
   printf '[faas] exit_code=%s\n' "$rc"
   printf '[faas] result_txt=%s\n' "$RESULT_TXT"
 }
 trap on_exit EXIT
 
+capture_provider_stack() {
+  "$PYTHON_BIN" - <<'PY'
+import importlib.metadata
+import json
+
+packages = (
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "triton",
+    "vllm",
+    "transformers",
+    "accelerate",
+    "datasets",
+    "tokenizers",
+    "safetensors",
+    "huggingface-hub",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "matplotlib",
+    "pillow",
+    "opencv-python-headless",
+)
+versions = {}
+for package in packages:
+    try:
+        versions[package] = importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        pass
+print(json.dumps(versions, sort_keys=True))
+PY
+}
+
 case "$INSTALL_DEPS" in
   1|true|yes|on)
-    echo "[faas] installing requirements-faas.txt"
-    "$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements-faas.txt"
+    echo "[faas] stage=install_dependencies"
+    echo "[faas] installing requirements-faas.txt without replacing the base torch stack"
+    BASE_STACK_JSON="$(capture_provider_stack)"
+    echo "[faas] base_stack_before=$BASE_STACK_JSON"
+    BASE_CONSTRAINTS_PATH="$(mktemp "${TMPDIR:-/tmp}/asa-faas-base-constraints.XXXXXX")"
+    printf '%s' "$BASE_STACK_JSON" | "$PYTHON_BIN" -c \
+      'import json,sys; data=json.load(sys.stdin); print("\n".join(f"{key}=={value}" for key,value in sorted(data.items())))' \
+      > "$BASE_CONSTRAINTS_PATH"
+    PIP_CONSTRAINT="$BASE_CONSTRAINTS_PATH" "$PYTHON_BIN" -m pip install \
+      --disable-pip-version-check \
+      --no-cache-dir \
+      --prefer-binary \
+      -r "$ROOT_DIR/requirements-faas.txt"
+    "$PYTHON_BIN" -m pip check
+    POST_INSTALL_STACK_JSON="$(capture_provider_stack)"
+    echo "[faas] base_stack_after=$POST_INSTALL_STACK_JSON"
+    if [[ "$BASE_STACK_JSON" != "$POST_INSTALL_STACK_JSON" ]]; then
+      echo "ERROR: dependency installation changed the provider base stack." >&2
+      exit 2
+    fi
     ;;
   0|false|no|off|'') ;;
   *)
@@ -108,6 +172,7 @@ echo "[faas] transfer_models=$TRANSFER_MODELS"
 echo "[faas] max_samples=$MAX_SAMPLES"
 echo "[faas] run_root=$RUN_ROOT"
 echo "[faas] hf_cache_root=$HF_CACHE_ROOT"
+echo "[faas] torch_home=$TORCH_HOME"
 
 case "$FAAS_DRY_RUN" in
   1|true|yes|on)
@@ -137,6 +202,60 @@ if [[ -z "${HF_TOKEN:-}" && -z "${HUGGINGFACE_HUB_TOKEN:-}" && -z "${HUGGING_FAC
   echo "ERROR: configure HF_TOKEN (preferably as a FaaS secret) or HF_TOKEN_FILE." >&2
   exit 2
 fi
+
+echo "[faas] stage=environment_preflight"
+"$PYTHON_BIN" - <<'PY'
+import json
+
+import torch
+import torchvision
+import transformers
+import diffusers
+import timm
+import yaml
+from art.estimators.classification import PyTorchClassifier
+from diffusers import Flux2KleinKVPipeline
+from natsort import natsorted
+from pytorch_fid import fid_score
+from transformers import AutoModelForImageTextToText, AutoProcessor
+
+del (
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    Flux2KleinKVPipeline,
+    PyTorchClassifier,
+    fid_score,
+    natsorted,
+    timm,
+    yaml,
+)
+
+versions = {
+    "torch": torch.__version__,
+    "torchvision": torchvision.__version__,
+    "torch_cuda": torch.version.cuda,
+    "transformers": transformers.__version__,
+    "diffusers": diffusers.__version__,
+}
+print("[faas] environment_versions=" + json.dumps(versions, sort_keys=True))
+
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is not available to PyTorch")
+
+torch.manual_seed(123)
+torch.cuda.manual_seed_all(123)
+matrix = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
+witness = matrix @ matrix.T
+torch.cuda.synchronize()
+if witness.shape != (8, 8) or not torch.isfinite(witness).all():
+    raise SystemExit("CUDA kernel witness produced an invalid result")
+print(
+    "[faas] CUDA_WITNESS "
+    f"shape={tuple(witness.shape)} "
+    f"sum={float(witness.sum().item()):.1f} "
+    f"device={torch.cuda.get_device_name(torch.cuda.current_device())}"
+)
+PY
 
 echo "[faas] stage=source_attack"
 env \
