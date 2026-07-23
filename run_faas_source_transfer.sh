@@ -102,12 +102,40 @@ print(json.dumps(versions, sort_keys=True))
 PY
 }
 
+capture_pip_check() {
+  "$PYTHON_BIN" - <<'PY'
+import json
+import subprocess
+import sys
+
+completed = subprocess.run(
+    [sys.executable, "-m", "pip", "check"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    check=False,
+)
+issues = []
+if completed.returncode != 0:
+    issues = sorted(
+        {
+            line.strip()
+            for line in completed.stdout.splitlines()
+            if line.strip()
+        }
+    )
+print(json.dumps(issues, sort_keys=True))
+PY
+}
+
 case "$INSTALL_DEPS" in
   1|true|yes|on)
     echo "[faas] stage=install_dependencies"
     echo "[faas] installing requirements-faas.txt without replacing the base torch stack"
     BASE_STACK_JSON="$(capture_provider_stack)"
+    BASE_PIP_CHECK_JSON="$(capture_pip_check)"
     echo "[faas] base_stack_before=$BASE_STACK_JSON"
+    echo "[faas] pip_check_before=$BASE_PIP_CHECK_JSON"
     BASE_CONSTRAINTS_PATH="$(mktemp "${TMPDIR:-/tmp}/asa-faas-base-constraints.XXXXXX")"
     printf '%s' "$BASE_STACK_JSON" | "$PYTHON_BIN" -c \
       'import json,sys; data=json.load(sys.stdin); print("\n".join(f"{key}=={value}" for key,value in sorted(data.items())))' \
@@ -117,12 +145,20 @@ case "$INSTALL_DEPS" in
       --no-cache-dir \
       --prefer-binary \
       -r "$ROOT_DIR/requirements-faas.txt"
-    "$PYTHON_BIN" -m pip check
     POST_INSTALL_STACK_JSON="$(capture_provider_stack)"
+    POST_INSTALL_PIP_CHECK_JSON="$(capture_pip_check)"
     echo "[faas] base_stack_after=$POST_INSTALL_STACK_JSON"
+    echo "[faas] pip_check_after=$POST_INSTALL_PIP_CHECK_JSON"
     if [[ "$BASE_STACK_JSON" != "$POST_INSTALL_STACK_JSON" ]]; then
       echo "ERROR: dependency installation changed the provider base stack." >&2
       exit 2
+    fi
+    if [[ "$BASE_PIP_CHECK_JSON" != "$POST_INSTALL_PIP_CHECK_JSON" ]]; then
+      echo "ERROR: dependency installation changed the pip check result." >&2
+      exit 2
+    fi
+    if [[ "$POST_INSTALL_PIP_CHECK_JSON" != "[]" ]]; then
+      echo "[faas] WARNING: preserving pre-existing provider pip issues: $POST_INSTALL_PIP_CHECK_JSON"
     fi
     ;;
   0|false|no|off|'') ;;
