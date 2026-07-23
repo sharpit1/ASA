@@ -16,19 +16,28 @@ a FaaS secret; never write it into a config file.
 
 ```bash
 export HF_TOKEN='configured-by-the-faas-secret-manager'
-INSTALL_DEPS=1 ./run_faas_source_transfer.sh
+./run_faas_source_transfer.sh
 ```
+
+The script installs the packages missing from the `kau/pytorch-master` image
+before the attack. It deliberately keeps the image-provided CUDA builds of
+PyTorch, torchvision, torchaudio, Triton, Transformers, Accelerate, NumPy,
+SciPy, scikit-learn, Pillow, and OpenCV. After installation it runs `pip check`,
+verifies that the provider package versions did not change, imports the FLUX.2
+KV, Gemma, ART, and transfer-evaluation components, and executes a seeded CUDA
+kernel witness before downloading model weights.
 
 The default job:
 
-1. attacks `resnet50` on all 1,000 NIPS2017 images with
+1. installs and validates the missing FaaS dependencies;
+2. attacks `resnet50` on all 1,000 NIPS2017 images with
    `configs/flux2_and_attack_nips.yaml`;
-2. downloads generator/classifier weights into ignored cache directories;
-3. builds `adversarial_examples.npz` in the ignored run directory;
-4. evaluates source ASR and transfer ASR on
+3. downloads generator/classifier weights into ignored cache directories;
+4. builds `adversarial_examples.npz` in the ignored run directory;
+5. evaluates source ASR and transfer ASR on
    `resnet50,wrn50,inception_v3,convnext,vgg19,vit,swin,deit`;
-5. prints all progress and a final TSV/JSON metric summary to standard output;
-6. mirrors standard output to `results/<run-name>.txt`.
+6. prints all progress and a final TSV/JSON metric summary to standard output;
+7. mirrors standard output to `results/<run-name>.txt`.
 
 FaaS consoles that expose only text output can therefore show the full result
 without downloading image artifacts.
@@ -40,7 +49,6 @@ SOURCE_MODEL=resnet50 \
 TRANSFER_MODELS=resnet50,convnext,swin,deit \
 MAX_SAMPLES=100 \
 RUN_NAME=asa_resnet50_nips100 \
-INSTALL_DEPS=1 \
 ./run_faas_source_transfer.sh
 ```
 
@@ -55,14 +63,15 @@ Available settings:
 | `RUN_NAME` | timestamped name | Unique output name |
 | `OUTPUT_ROOT` | `outputs` | Ignored attack artifact root |
 | `RESULT_DIR` | `results` | Ignored TXT result root |
-| `INSTALL_DEPS` | `0` | Install `requirements-faas.txt` when set to `1` |
+| `INSTALL_DEPS` | `1` | Install missing FaaS packages; set to `0` only for a prebuilt environment |
 | `HF_CACHE_ROOT` | `.cache/huggingface` | Ignored Hugging Face cache |
+| `TORCH_HOME` | `ckpt/torch_hub` | Ignored torchvision/timm weight cache |
 | `NPZ_BATCH_SIZE` | `64` | NPZ conversion batch size |
 
 Run a configuration-only check without loading models:
 
 ```bash
-FAAS_DRY_RUN=1 ./run_faas_source_transfer.sh
+INSTALL_DEPS=0 FAAS_DRY_RUN=1 ./run_faas_source_transfer.sh
 ```
 
 ## Manual attack
