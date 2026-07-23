@@ -22,9 +22,11 @@ export HF_TOKEN='configured-by-the-faas-secret-manager'
 The script installs the packages missing from the `kau/pytorch-master` image
 before the attack. It deliberately keeps the image-provided CUDA builds of
 PyTorch, torchvision, torchaudio, Triton, Transformers, Accelerate, NumPy,
-SciPy, scikit-learn, Pillow, and OpenCV. After installation it runs `pip check`,
-verifies that the provider package versions did not change, imports the FLUX.2
-KV, Gemma, ART, and transfer-evaluation components, and executes a seeded CUDA
+SciPy, scikit-learn, Pillow, and OpenCV. It compares `pip check` before and
+after installation, allowing an unchanged issue already present in the
+provider image while rejecting newly introduced conflicts. It also verifies
+that the provider package versions did not change, imports the FLUX.2 KV,
+Gemma, ART, and transfer-evaluation components, and executes a seeded CUDA
 kernel witness before downloading model weights.
 
 The default job:
