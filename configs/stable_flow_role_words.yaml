@@ -1,0 +1,64 @@
+# Stable-Flow preset for role-word GCG optimization.
+# Pair with:
+#   ./run_stable_flow_role_words.sh
+# or
+#   python stable_flow_runner.py ... --token_optimizer_variant role_word
+
+sd_pipeline_type: stable_flow
+sd_model_id: black-forest-labs/FLUX.1-dev
+stable_flow_dir: third_party/stable-flow
+stable_flow_repo_url: https://github.com/snap-research/stable-flow.git
+auto_clone_stable_flow: true
+stable_flow_cpu_offload: false
+stable_flow_height: 1024
+stable_flow_width: 1024
+stable_flow_max_sequence_length: 512
+stable_flow_latent_nudging_scalar: 1.15
+stable_flow_mm_copy_blocks: 0,1,17,18
+stable_flow_single_copy_blocks: 9,34,35,37,6
+
+guidance_scale: 3.0
+strength: 1
+sd_steps: 50
+sd_prompt_only: false
+sd_gradient_checkpointing: true
+steps: 50
+lr: 0.001
+
+token_update_method: gcg
+gcg_topk: 256
+gcg_batch_size: 16
+gcg_allow_non_ascii: false
+gcg_prompt_word_mode: true
+gcg_normalize_grad: true
+gcg_clip_relevance_threshold: 0
+gcg_filter_background_with_wordnet: true
+
+token_optimizer_variant: role_word
+
+model_name: resnet50
+label_start: 0
+label_end: 10
+label_image_root: data/resnet
+
+token_roles: background,color,position
+token_combinations:
+  - background
+  - color
+  - position
+  - [background, color]
+  - [position, color]
+  - [background, position]
+  - [background, color, position]
+active_roles: auto
+
+token_init_mode: vlm
+vlm_backend: gemma3
+vlm_model_id: google/gemma-3-4b-it
+vlm_device: auto
+vlm_max_new_tokens: 32
+
+use_div_loss_values: [false]
+use_sem_loss_values: [false]
+use_token_l2_loss_values: [false]
+use_token_cos_loss_values: [false]

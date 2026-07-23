@@ -1,0 +1,60 @@
+# Flux2 Klein black-box AND attack preset.
+# Usage:
+#   CONFIG=configs/flux2_and_attack_nips.yaml ./run_vlm_attack.sh
+#   HF_TOKEN=... CONFIG=configs/flux2_and_attack_nips.yaml ./run_vlm_attack.sh
+
+script_path: flux2_attack_runner.py
+# cuda_visible_devices: "6"
+hf_token_env: HF_TOKEN
+dataset_root: data/nips2017
+output_root: outputs
+wandb_enable: false
+
+
+run_args:
+  attack_mode: and
+  gcg_scene_vocab_prompts_per_strategy: 1
+  dataset_root: data/nips2017
+  dataset_name: nips2017
+  output_root: outputs
+  # run_name: flux2_and_attack_q100_teaser
+  wandb_project: resnet_flux2_and_attack_q100
+  start_index: 0
+  max_samples: 1000
+
+  victim_model: resnet50
+  device: cuda
+  manual_seed: 123
+  classifier_objective: logit_margin_max
+
+  model_path: black-forest-labs/FLUX.2-klein-9b-kv
+  cpu_offload: false
+  prompt: "a photo of <class> in the background"
+  gcg_word: background
+  gcg_occurrence: 0
+  gcg_steps: 50
+  gcg_batch_size: 3
+  max_victim_queries: 100
+  height: 1024
+  width: 1024
+  num_inference_steps: 4
+  max_sequence_length: 512
+  # guidance_scale: 3.0
+  gcg_candidate_source:  gemma_scene_vocab
+  gcg_scene_vocab_size: 3
+  scene_fallback: outdoor
+
+
+  wandb_mode: auto
+  wandb_log_every: 1
+
+  scene_vlm_backend: gemma4
+  scene_vlm_model_id: google/gemma-4-E4B-it #  google/gemma-3-27b-it |google/gemma-4-E4B-it |  google/gemma-4-26B-A4B-it | google/gemma-4-31B-it
+  scene_vlm_device: auto
+  scene_vlm_max_new_tokens: 4096
+  scene_vlm_thinking: false
+  scene_vlm_do_sample: false
+  gcg_scene_llm_model_id: google/gemma-4-E4B-it # google/gemma-3-12b-it |google/gemma-4-E4B-it |  google/gemma-4-26B-A4B-it | google/gemma-4-31B-it
+  gcg_scene_llm_thinking: false
+  gcg_slot_candidate_max_words: 5
+  gcg_early_stop_on_attack_success: true

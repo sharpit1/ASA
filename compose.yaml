@@ -1,0 +1,24 @@
+services:
+  asa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: adversarial-scenario:ds
+    working_dir: /workspace/Adversarial-Scenario
+    gpus:
+      - driver: nvidia
+        count: all
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      TORCH_HOME: /root/.cache/torch
+    volumes:
+      - .:/workspace/Adversarial-Scenario
+      - huggingface-cache:/root/.cache/huggingface
+      - torch-cache:/root/.cache/torch
+
+volumes:
+  huggingface-cache:
+  torch-cache:

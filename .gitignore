@@ -1,0 +1,64 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Editor, agent, and local task state
+.vscode/
+.idea/
+.agents/
+.aris/
+.codex/
+.codex_runs/
+.local/
+.tmp/
+tmp/
+.asa_*
+
+# Runtime caches, downloaded models, and checkpoints
+.cache/
+ckpt/
+pretrained_models/
+huggingface/
+wandb/
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.npy
+
+# Generated outputs and logs
+artifacts/
+outputs/
+results/
+logs/
+assets/
+examples/
+papers/
+*.log
+
+# Keep only the NIPS 2017 dataset in Git.
+data/*
+!data/nips2017/
+!data/nips2017/**
+
+# Local third-party checkouts are optional and downloaded on the remote host.
+third_party/
+
+# Archives and generated adversarial bundles
+*.zip
+*.tar
+*.tar.gz
+*.npz
+
+# OS metadata
+.DS_Store
+Thumbs.db

@@ -1,0 +1,100 @@
+# Prompt-only img2img preset with explicit output resolution.
+# Use with:
+#   python optimize_tokens.py --config configs/img2img_prompt_only_resolution.yaml --true_label <...>
+# or
+#   CONFIG=configs/img2img_prompt_only_resolution.yaml ./run_sd_img2img.sh
+#
+# If you run through run_sd_img2img.sh, the script may still pass --image,
+# but prompt-only generation will use the width/height below instead of the
+# source image size when these values are > 0.
+
+sd_pipeline_type: img2img
+sd_model_id: stabilityai/stable-diffusion-3.5-medium
+
+# Core optimization defaults
+steps: 50
+lr: 0.001
+guidance_scale: 7
+strength: 0.4
+sd_steps: 35
+sd_prompt_only: true
+sd_prompt_only_height: 768
+sd_prompt_only_width: 768
+sd_gradient_checkpointing: true
+
+# Discrete GCG search knobs
+token_update_method: gcg
+gcg_topk: 256
+gcg_batch_size: 16
+gcg_allow_non_ascii: false
+gcg_normalize_grad: true
+gcg_clip_relevance_threshold: 0.4
+# intersection: per-encoder gradient intersection, clip1_only: clip1 gradient only
+gcg_sd3_candidate_mode: clip1_only
+gcg_filter_background_with_wordnet: true
+# gcg_background_vocab_module_path: /workspace/Adversarial-Scenario/wordnet_background_vocab.py
+
+# Token setup
+# num_tokens: 3
+# token_roles: background,color,position
+token_init_mode: manual
+token_init_words: ""
+prompt_only_background_with_vlm: true
+vlm_backend: gemma3
+vlm_model_id: google/gemma-3-4b-it
+vlm_max_new_tokens: 48
+class_concept_with_llava: false
+prompt_with_llava: false
+prompt_vlm_backend: llava
+prompt_vlm_model_id: llava-hf/llava-1.5-7b-hf
+prompt_with_llava_fix_class_name: false
+prompt_class_name_fix_with_gemma: false
+prompt_class_name_fix_model_id: google/gemma-3-4b-it
+prompt_class_name_fix_device: auto
+prompt_class_name_fix_max_new_tokens: 64
+prompt_with_llava_max_new_tokens: 48
+
+# run_sd_img2img.sh sweep controls
+token_combinations:
+  - background
+  - color
+  - position
+  - [background, color]
+  - [color, position]
+  - [background, position]
+  - [background, color, position]
+
+# Regularization sweeps for run_sd_img2img.sh
+use_token_cos_loss_values: [false, true]
+se_div_los_values: [false]
+use_token_l2_loss_values: [false]
+use_sem_loss_values: [false]
+
+# Label selection for run_sd_img2img.sh
+label_start: 0
+label_end: 10
+label_stride: 1
+label_max_count: 0
+# label_indices: [0, 7, 42]
+
+# Regularization toggles
+lambda_div: 0.01
+lambda_sem: 0.01
+lambda_token_l2: 0.01
+lambda_token_cos: 0.01
+max_grad_norm: 1.0
+
+# Prompt/device
+negative_prompt: "low quality, jpeg artifacts, blurry, ugly"
+negative_prompt_from_init_mode: none
+sd_device_map: balanced
+device: cuda
+dtype: auto
+verbose_metrics: false
+
+# Optional Weights & Biases logging
+wandb_enable: true
+wandb_entity: sharpit
+wandb_project: Adversarial Token
+wandb_mode: online
+wandb_log_every: 1

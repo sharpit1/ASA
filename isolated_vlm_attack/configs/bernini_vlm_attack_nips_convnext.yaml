@@ -1,0 +1,76 @@
+# Bernini i2i black-box VLM attack preset.
+# Usage:
+#   CONFIG=configs/bernini_vlm_attack_nips.yaml ./run_vlm_attack.sh
+#   PYTHON_BIN=/NHNHOME/WORKSPACE/0226010134_A/miniconda3/envs/ds/bin/python \
+#     CONFIG=configs/bernini_vlm_attack_nips.yaml ./run_vlm_attack.sh
+
+script_path: bernini_attack_runner.py
+# cuda_visible_devices: "4"
+hf_token_env: HF_TOKEN
+dataset_root: data/nips2017
+output_root: outputs
+wandb_enable: false
+
+run_args:
+  attack_mode: vlm
+  dataset_root: data/nips2017
+  dataset_name: nips2017
+  output_root: outputs
+  victim_model: convnext
+  run_name: auto
+  wandb_project: bernini_vlm_no_attack_q100
+  start_index: 0
+  max_samples: 1000
+
+  device: cuda
+  manual_seed: 123
+  classifier_objective: logit_margin_max
+
+  prompt: "a photo of <class> in the background"
+  gcg_word: background
+  gcg_occurrence: 0
+  gcg_steps: 50
+  gcg_batch_size: 3
+  max_victim_queries: 100
+  height: 512
+  width: 512
+  num_inference_steps: 20
+  max_sequence_length: 512
+
+  bernini_root: third_party/bernini
+  bernini_config: third_party/bernini/Bernini-R-Diffusers
+  bernini_task_type: i2i
+  bernini_guidance_mode: v2v
+  bernini_num_frames: 1
+  bernini_max_image_size: 1024
+  bernini_use_unipc: true
+  bernini_use_src_tgt_id: true
+  bernini_omega_V: 1.25
+  bernini_omega_I: 4.5
+  bernini_omega_TI: 4.0
+  bernini_omega_scale: 0.8
+  bernini_flow_shift: 5.0
+  bernini_eta: 0.5
+  bernini_norm_threshold: [50.0, 50.0, 50.0]
+  bernini_momentum: 0.0
+  bernini_batch_render: true
+  bernini_batch_fallback: false
+  bernini_batch_size: 0
+
+  gcg_candidate_source: gemma_scene_vocab
+  gcg_scene_vocab_size: 3
+  scene_fallback: outdoor
+
+  wandb_mode: auto
+  wandb_log_every: 1
+
+  scene_vlm_backend: gemma4
+  scene_vlm_model_id: google/gemma-4-E4B-it
+  scene_vlm_device: auto
+  scene_vlm_max_new_tokens: 4096
+  scene_vlm_thinking: false
+  scene_vlm_do_sample: false
+  gcg_scene_llm_model_id: google/gemma-4-E4B-it
+  gcg_scene_llm_thinking: false
+  gcg_slot_candidate_max_words: 5
+  gcg_early_stop_on_attack_success: true

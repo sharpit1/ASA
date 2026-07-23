@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Source/transfer classifier evaluation
+adversarial-robustness-toolbox>=1.18,<2
+pytorch-fid>=0.3,<1
+einops>=0.8,<1

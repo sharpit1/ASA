@@ -1,0 +1,74 @@
+# Inpainting preset for optimize_tokens.py
+# Use with: python optimize_tokens.py --config configs/inpaint.yaml --image <...> --true_label <...>
+# Or with run.sh: CONFIG_PRESET=inpaint INPAINT_MASK=/path/to/mask.png ./run.sh
+# white=edit, black=keep
+
+sd_pipeline_type: inpaint
+sd_model_id: runwayml/stable-diffusion-inpainting
+
+# Set this for your environment. You can override it via CLI/run.sh.
+inpaint_mask: null
+
+# run_sd_inpaint.sh controls
+parallel_runs: 1
+parallel_by: index
+label_start: 4
+label_end: 10
+label_stride: 1
+label_max_count: 0
+# Explicit mode (if set, overrides label_start/label_end/label_stride):
+# label_indices: [4, 6, 10]
+
+# Role sweep controls
+token_combinations:
+  - background
+# - [background, color]
+use_div_loss_values: [false]
+
+auto_mask: true
+auto_mask_concept: null
+auto_mask_invert: true
+auto_mask_force_regen: true
+
+# Core optimization defaults
+steps: 100
+lr: 0.001
+guidance_scale: 7
+strength: 0.8
+sd_steps: 50
+
+# Token setup
+num_tokens: 1
+token_roles: background
+token_init_mode: vlm
+token_init_words: ""
+vlm_backend: llava
+active_roles: background
+class_concept_with_llava: false
+prompt_with_llava: true
+prompt_with_llava_question: "The known ImageNet class name is '{class_name}'. Using the image, write one natural single-sentence visual prompt (10 to 28 words) describing the main subject’s intrinsic attributes (shape, color, posture) and immediate scene context. Weave role cues naturally (background, color mood, subject position) into the sentence rather than listing tags. Mention '{class_name}' exactly once. Avoid camera jargon and quality/style boilerplate."
+vlm_max_new_tokens: 48
+prompt_with_llava_max_new_tokens: 48
+prompt_with_llava_replace_roles: true
+
+# Regularization toggles
+use_div_loss: false
+use_sem_loss: false
+use_token_l2_loss: false
+use_token_cos_loss: false
+lambda_div: 0.01
+lambda_sem: 0.01
+lambda_token_l2: 0.01
+lambda_token_cos: 0.01
+max_grad_norm: 1.0
+
+# Prompt/device
+negative_prompt: low quality, jpeg artifacts, blurry, ugly
+negative_prompt_from_init_mode: none
+# Split one inpainting model across multiple GPUs (single run mode).
+# Use with run_sd_inpaint.sh as: PARALLEL_RUNS=1
+sd_device_map: balanced
+sd_gradient_checkpointing: false
+device: cuda
+dtype: auto
+verbose_metrics: false

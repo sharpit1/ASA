@@ -1,0 +1,15 @@
+numpy>=1.26,<2.0
+scipy>=1.11,<2
+scikit-image>=0.24,<1
+Pillow>=10,<12
+tqdm>=4.66,<5
+natsort>=8.4,<9
+lpips==0.1.4
+timm>=1.0,<2
+adversarial-robustness-toolbox>=1.18,<2
+pytorch-fid>=0.3,<1
+transformers>=4.50,<5
+accelerate>=1.0,<2
+huggingface-hub>=0.30,<2
+safetensors>=0.4,<1
+einops>=0.8,<1

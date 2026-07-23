@@ -1,0 +1,79 @@
+# Qwen Image Edit 2511 black-box attack preset.
+# Use with:
+#   CONFIG=configs/qwen_edit_and_swin.yaml ./run_vlm_attack.sh
+
+runner_variant: qwen2
+# cuda_visible_devices: "6"
+hf_token_env: HF_TOKEN
+dataset_root: data/nips2017
+output_root: outputs
+wandb_enable: false
+
+run_args:
+  # Supported by qwen2_attack_runner.py: vlm | and
+  attack_mode: and
+
+  dataset_root: data/nips2017
+  dataset_name: nips2017
+  output_root: outputs
+  victim_model: swin
+  # run_name: qwen_edit_and_res_it20
+  wandb_project: qwen_image_edit_attack
+  start_index: 0
+  max_samples: 1000
+
+  device: cuda
+  manual_seed: 123
+  classifier_objective: logit_margin_max
+
+  model_path: Qwen/Qwen-Image-Edit-2511
+  cpu_offload: false
+  prompt: "a photo of <class> in the background"
+  gcg_word: background
+  gcg_occurrence: 0
+  gcg_steps: 50
+  gcg_batch_size: 3
+  max_victim_queries: 100
+
+  # Qwen input image is resized to this size before editing.
+  height: 1024
+  width: 1024
+  image_size: 224
+
+  # max_sequence_length: 512
+  guidance_scale: 1.0
+  qwen_true_cfg_scale: 4.0
+  qwen_negative_prompt: " "
+  qwen_num_images_per_prompt: 1
+  num_inference_steps: 4
+
+  # Match Flux2 VLM preset: generate edit-instruction candidates with scene vocab.
+  gcg_candidate_source: gemma_scene_vocab
+  gcg_scene_vocab_size: 3
+  scene_fallback: outdoor
+
+  gcg_scene_vocab_prompts_per_strategy: 1
+  gcg_scene_vocab_enabled_strategies: all
+  gcg_slot_candidate_max_words: 5
+  gcg_scene_vocab_feedback: true
+  gcg_scene_feedback_limit: 1000
+
+
+  wandb_enable: false
+  wandb_mode: auto
+  wandb_log_every: 1
+
+  scene_vlm_backend: gemma4
+  scene_vlm_model_id: google/gemma-4-E4B-it
+  scene_vlm_device: auto
+  scene_vlm_max_new_tokens: 4096
+  scene_vlm_thinking: false
+  scene_vlm_do_sample: false
+  gcg_scene_llm_backend: gemma4
+  gcg_scene_llm_model_id: google/gemma-4-E4B-it
+  gcg_scene_llm_device: auto
+  gcg_scene_llm_max_new_tokens: 4096
+  gcg_scene_llm_thinking: false
+  gcg_scene_llm_do_sample: false
+
+  gcg_early_stop_on_attack_success: true

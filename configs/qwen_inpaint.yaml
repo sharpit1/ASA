@@ -1,0 +1,52 @@
+# Qwen ControlNet inpainting preset for optimize_tokens.py
+# Qwen-only preset: do not use sd_* keys here.
+# Use with:
+#   python optimize_tokens.py --config configs/qwen_inpaint.yaml --image <...> --true_label <...>
+# Or with run_qwen.sh:
+#   CONFIG_PRESET=qwen_inpaint INPAINT_MASK=/path/to/mask.png ./run_qwen.sh
+# qwen_model_id can be a full Diffusers repo (e.g. Qwen/Qwen-Image)
+# or the FP8 single-file alias repo (drbaph/Qwen-Image-Edit-2511-FP8).
+
+qwen_pipeline_type: qwen_inpaint
+qwen_model_id: drbaph/Qwen-Image-Edit-2511-FP8
+qwen_controlnet_model_id: InstantX/Qwen-Image-ControlNet-Inpainting
+qwen_controlnet_conditioning_scale: 1.0
+qwen_max_sequence_length: 512
+qwen_attention_backend: auto
+
+# Set this for your environment. You can override it via CLI/run.sh.
+inpaint_mask: null
+
+# Core optimization defaults
+steps: 100
+lr: 0.001
+guidance_scale: 1.0
+strength: 1.0
+qwen_steps: 30
+
+# Token setup
+num_tokens: 3
+token_roles: background,color,position
+token_init_mode: vlm
+token_init_words: ""
+active_roles: background,color,position
+
+# Regularization toggles
+use_div_loss: false
+use_sem_loss: false
+use_token_l2_loss: false
+use_token_cos_loss: false
+lambda_div: 0.01
+lambda_sem: 0.01
+lambda_token_l2: 0.01
+lambda_token_cos: 0.01
+max_grad_norm: 1.0
+
+# Prompt/device
+negative_prompt: " "
+negative_prompt_from_init_mode: vlm
+device_map: none
+gradient_checkpointing: true
+device: cuda
+dtype: bfloat16
+verbose_metrics: false
