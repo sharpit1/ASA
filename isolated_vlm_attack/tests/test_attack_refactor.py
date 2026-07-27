@@ -1478,6 +1478,44 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertEqual(pipe.transformer.batch_sizes, [2, 2, 2, 2])
         self.assertTrue(pipe.freed)
 
+    def test_qwen_pipeline_only_passes_guidance_scale_to_distilled_models(self) -> None:
+        class FakePipeline:
+            def __init__(self, *, guidance_embeds: bool):
+                self.transformer = SimpleNamespace(
+                    config=SimpleNamespace(guidance_embeds=guidance_embeds)
+                )
+                self.call_kwargs = None
+
+            def __call__(self, **kwargs):
+                self.call_kwargs = dict(kwargs)
+                return SimpleNamespace(images=[Image.new("RGB", (8, 8), "white")])
+
+        for guidance_embeds in (False, True):
+            with self.subTest(guidance_embeds=guidance_embeds):
+                session = object.__new__(QwenImageEditRenderSession)
+                session.args = SimpleNamespace(
+                    device="cpu",
+                    qwen_true_cfg_scale=4.0,
+                    qwen_negative_prompt=" ",
+                    num_inference_steps=4,
+                    max_sequence_length=512,
+                    guidance_scale=1.75,
+                    qwen_num_images_per_prompt=1,
+                )
+                session.pipe = FakePipeline(guidance_embeds=guidance_embeds)
+
+                image = session._pipe_call(
+                    prompt="test prompt",
+                    image=Image.new("RGB", (8, 8), "black"),
+                    seed=1,
+                )
+
+                self.assertEqual(image.size, (8, 8))
+                if guidance_embeds:
+                    self.assertEqual(session.pipe.call_kwargs["guidance_scale"], 1.75)
+                else:
+                    self.assertNotIn("guidance_scale", session.pipe.call_kwargs)
+
     def test_qwen_render_batches_distinct_prompts_and_preserves_seed_order(self) -> None:
         session = object.__new__(QwenImageEditRenderSession)
         session.args = SimpleNamespace(
