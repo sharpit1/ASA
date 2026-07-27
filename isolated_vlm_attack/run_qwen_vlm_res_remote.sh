@@ -7,13 +7,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VENV_DIR="${VENV_DIR:-$PROJECT_ROOT/.venv}"
-PYTHON_BIN_WAS_SET=0
-if [[ -n "${PYTHON_BIN:-}" ]]; then
-  PYTHON_BIN_WAS_SET=1
-else
-  PYTHON_BIN="$VENV_DIR/bin/python"
-fi
+PYTHON_BIN="${PYTHON_BIN:-}"
 HF_CACHE_ROOT="${HF_CACHE_ROOT:-$PROJECT_ROOT/.cache/huggingface}"
 TORCH_HOME="${TORCH_HOME:-$PROJECT_ROOT/.cache/torch}"
 CONFIG_PATH="${CONFIG_PATH:-configs/qwen_edit_vlm_res.yaml}"
@@ -61,14 +55,12 @@ find_system_python() {
   fi
 }
 
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  if [[ "$PYTHON_BIN_WAS_SET" == "1" ]]; then
-    die "PYTHON_BIN is not executable: $PYTHON_BIN"
-  fi
-  SYSTEM_PYTHON="$(find_system_python)" \
-    || die "python3/python is required to create $VENV_DIR"
-  echo "[setup] creating venv with provider packages: $VENV_DIR"
-  "$SYSTEM_PYTHON" -m venv --system-site-packages "$VENV_DIR"
+if [[ -n "$PYTHON_BIN" ]]; then
+  [[ -x "$PYTHON_BIN" ]] || die "PYTHON_BIN is not executable: $PYTHON_BIN"
+else
+  PYTHON_BIN="$(find_system_python)" \
+    || die "python3/python is required"
+  echo "[setup] using provider system Python: $PYTHON_BIN"
 fi
 
 [[ -x "$PYTHON_BIN" ]] || die "python is not executable: $PYTHON_BIN"
