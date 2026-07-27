@@ -33,6 +33,7 @@ from attack_runner_common import (
     resolve_run_root,
     resolve_sample_indices,
     resolve_optional_hf_token,
+    select_clean_correct_indices,
     validate_passthrough_core_args,
 )
 
@@ -100,6 +101,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qwen_true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--qwen_negative_prompt", type=str, default=" ")
     parser.add_argument("--qwen_num_images_per_prompt", type=int, choices=[1], default=1)
+    parser.add_argument(
+        "--qwen_batch_size",
+        type=int,
+        default=1,
+        help="Experimental single-GPU prompt batch size; 1 keeps upstream sequential inference.",
+    )
+    parser.add_argument(
+        "--qwen_batch_fallback",
+        type=parse_bool_flag,
+        default=True,
+        help="Fall back to sequential Qwen rendering if experimental batching fails.",
+    )
     return parser
 
 
@@ -121,6 +134,8 @@ def apply_qwen_runtime_args(core_args: argparse.Namespace, cfg: argparse.Namespa
     core_args.qwen_true_cfg_scale = float(getattr(cfg, "qwen_true_cfg_scale", 4.0))
     core_args.qwen_negative_prompt = str(getattr(cfg, "qwen_negative_prompt", " ") or " ")
     core_args.qwen_num_images_per_prompt = int(getattr(cfg, "qwen_num_images_per_prompt", 1))
+    core_args.qwen_batch_size = int(getattr(cfg, "qwen_batch_size", 1))
+    core_args.qwen_batch_fallback = bool(getattr(cfg, "qwen_batch_fallback", True))
     core_args.gcg_skip_initial_render = True
 
     qwen_attack_mode = str(getattr(cfg, "qwen_attack_mode", "vlm") or "vlm").strip().lower()
@@ -203,6 +218,8 @@ def main() -> int:
         raise ValueError("--max_sequence_length must be >= 1")
     if int(cfg.qwen_num_images_per_prompt) != 1:
         raise ValueError("--qwen_num_images_per_prompt is fixed at 1")
+    if int(cfg.qwen_batch_size) < 1:
+        raise ValueError("--qwen_batch_size must be >= 1")
     dataset_root = Path(str(cfg.dataset_root)).expanduser().resolve()
     images_csv = dataset_root / "images.csv"
     images_dir = dataset_root / "images"
@@ -260,6 +277,31 @@ def main() -> int:
         device=str(cfg.device),
         objective_mode=str(cfg.classifier_objective),
     )
+    candidate_indices = [
+        idx
+        for idx in range(start_index, end_index)
+        if sample_index_set is None or idx in sample_index_set
+    ]
+    attack_indices = set(candidate_indices)
+    clean_filter_results: List[dict] = []
+    if bool(cfg.attack_only_clean_correct):
+        attack_indices, clean_filter_results = select_clean_correct_indices(
+            victim=victim,
+            images_dir=images_dir,
+            image_ids=image_ids,
+            true_labels=true_labels,
+            candidate_indices=candidate_indices,
+            batch_size=batchsize,
+        )
+        clean_filter_error_count = sum(
+            item.get("status") == "error" for item in clean_filter_results
+        )
+        print(
+            "[qwen2_runner] clean filter "
+            f"examined={len(clean_filter_results)} selected={len(attack_indices)} "
+            f"skipped={len(clean_filter_results) - len(attack_indices)} "
+            f"errors={clean_filter_error_count}"
+        )
 
     results: List[dict] = []
     success_count = 0
@@ -281,6 +323,8 @@ def main() -> int:
                     stop_requested = True
                     break
                 if sample_index_set is not None and idx not in sample_index_set:
+                    continue
+                if idx not in attack_indices:
                     continue
 
                 image_id = str(image_id_batch[in_batch_idx])
@@ -410,7 +454,12 @@ def main() -> int:
                         partial_report = load_preserved_attack_report(report_path)
                         if partial_report is not None:
                             fail_payload["partial_core_report"] = partial_report
-                            for key in ("attack_success_query_count", "attack_success_candidate"):
+                            for key in (
+                                "attack_success_query_count",
+                                "attack_success_candidate",
+                                "attack_success_float32_path",
+                                "attack_success_float32_error",
+                            ):
                                 if key in partial_report:
                                     fail_payload[key] = partial_report[key]
                     report_path.write_text(json.dumps(fail_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -430,11 +479,27 @@ def main() -> int:
         "runner": "qwen2_attack_runner.py",
         "model_path": str(cfg.model_path),
         "qwen_attack_mode": str(getattr(cfg, "qwen_attack_mode", "vlm")),
+        "qwen_batch_size": int(getattr(cfg, "qwen_batch_size", 1)),
+        "qwen_batch_fallback": bool(getattr(cfg, "qwen_batch_fallback", True)),
         "run_name": run_name,
         "start_index": int(start_index),
         "end_index": int(end_index),
         "sample_indices_file": str(cfg.sample_indices_file or ""),
         "sample_indices": sample_indices,
+        "attack_only_clean_correct": bool(cfg.attack_only_clean_correct),
+        "clean_filter_examined_count": int(len(clean_filter_results)),
+        "clean_filter_passed_count": int(len(attack_indices))
+        if cfg.attack_only_clean_correct
+        else 0,
+        "clean_filter_skipped_count": int(
+            len(clean_filter_results) - len(attack_indices)
+        )
+        if cfg.attack_only_clean_correct
+        else 0,
+        "clean_filter_error_count": int(
+            sum(item.get("status") == "error" for item in clean_filter_results)
+        ),
+        "clean_filter_results": clean_filter_results,
         "total_processed": int(len(results)),
         "success_count": int(success_count),
         "fail_count": int(fail_count),
@@ -451,7 +516,7 @@ def main() -> int:
     print(f"[qwen2_runner] run_root={run_root}")
     print(f"[qwen2_runner] summary={summary_path}")
     print(f"[qwen2_runner] success={success_count} fail={fail_count}")
-    return 0 if fail_count == 0 else 1
+    return 0 if fail_count == 0 and summary["clean_filter_error_count"] == 0 else 1
 
 
 if __name__ == "__main__":

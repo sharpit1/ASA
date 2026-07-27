@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-07-24",
+  "timezone": "Asia/Seoul",
+  "scope": "pro6000 five-configuration ten-image smoke run",
+  "reviewer": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra",
+    "review_independence": "same-family",
+    "acceptance_status": "provisional"
+  },
+  "overall_verdict": "WARN",
+  "claim_supported": "Five configurations passed a ten-image pipeline smoke test with internally consistent PNG/float32 NPY/report artifacts.",
+  "claims_not_supported": [
+    "General ASR",
+    "Robustness",
+    "Method superiority"
+  ],
+  "schedule": {
+    "requested": "2026-07-24T00:00:00+09:00",
+    "orchestrator_started": "2026-07-24T00:07:31+09:00",
+    "first_workload_started_approximately": "2026-07-24T00:14:47+09:00",
+    "repair_completed": "2026-07-24T01:40:46+09:00",
+    "exact_schedule_met": false
+  },
+  "runs": [
+    {"id": "01", "name": "smoke_20260724_0000_01_flux2_and_nips", "processed": 10, "ok": 10, "failed": 0, "internal_attack_success": 10},
+    {"id": "02", "name": "smoke_20260724_0000_02_qwen_vlm_res", "processed": 10, "ok": 10, "failed": 0, "internal_attack_success": 10},
+    {"id": "03", "name": "smoke_20260724_0000_03_qwen_and_res", "processed": 10, "ok": 10, "failed": 0, "internal_attack_success": 10},
+    {"id": "05", "name": "smoke_20260724_0000_05_bernini_vlm_nips", "processed": 10, "ok": 10, "failed": 0, "internal_attack_success": 10},
+    {"id": "06", "name": "smoke_20260724_0000_06_bernini_and_nips", "processed": 10, "ok": 10, "failed": 0, "internal_attack_success": 10}
+  ],
+  "excluded_run": {
+    "id": "04",
+    "config": "configs/flux2_vlm_attack_nips.yaml",
+    "output_absent": true
+  },
+  "artifact_totals": {
+    "samples": 50,
+    "valid_png": 50,
+    "valid_float32_npy": 50,
+    "valid_png_npy_pairs": 50,
+    "final_attack_success_reports": 50,
+    "save_order_npy_then_png_then_report": 50
+  },
+  "classifications": {
+    "ground_truth_provenance": "PASS",
+    "score_normalization_and_asr_semantics": "WARN",
+    "result_task_fidelity": "PASS_FOR_SMOKE_SCOPE",
+    "output_plumbing": "WARN",
+    "experimental_scope": "WARN",
+    "evaluation_source": "PASS"
+  },
+  "flux_hf_token": {
+    "optional_in_active_code": true,
+    "actual_blank_token_smoke_passed": true,
+    "condition": "Public or locally cached model access; a fresh uncached gated repository may still require authentication."
+  },
+  "initial_failures_and_repairs": [
+    "Run 01 initially failed because Flux required a token; token handling was made optional.",
+    "Runs 05 and 06 initially failed on decord; decord2==3.4.0 was installed."
+  ],
+  "remaining_risks": [
+    "No archived clean-correct conditional ASR evaluation.",
+    "No independent ResNet50 replay of all 50 NPY files.",
+    "Reruns may leave stale sidecars unless all per-sample outputs are cleared or attempts are immutable.",
+    "Execution revision and complete artifact/dataset/model/config hashes are not captured in one canonical manifest.",
+    "No-token Flux reproducibility on a fresh uncached host is not established.",
+    "Stale repository-root duplicate scripts can confuse direct invocation.",
+    "Bernini created a redundant central Hugging Face cache; disk was approximately 95% used with about 82 GB free."
+  ],
+  "evidence": {
+    "artifact_audit": ".aris/remote_artifacts/20260724_0000/artifact_audit.json",
+    "orchestrator_log": ".aris/remote_artifacts/20260724_0000/orchestrator.log",
+    "repair_log": ".aris/remote_artifacts/20260724_0000/repair_retry.log",
+    "post_patch_validation": ".aris/remote_artifacts/20260724_0000/post_patch_validate.retry.log",
+    "raw_runs": ".aris/remote_artifacts/20260724_0000/runs"
+  }
+}

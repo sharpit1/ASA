@@ -1,8 +1,10 @@
 import argparse
 import csv
 import datetime
+import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,20 +15,30 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import torch
 from PIL import Image
-from art.estimators.classification import PyTorchClassifier
-from natsort import index_natsorted
 from tqdm import tqdm
+
+try:
+    from art.estimators.classification import PyTorchClassifier
+except Exception:  # pragma: no cover
+    PyTorchClassifier = None
+
+try:
+    from natsort import index_natsorted
+except Exception:  # pragma: no cover
+    def index_natsorted(values):
+        def _natural_key(value: object):
+            return [
+                int(token) if token.isdigit() else token.lower()
+                for token in re.split(r"(\d+)", str(value))
+            ]
+
+        return sorted(range(len(values)), key=lambda idx: _natural_key(values[idx]))
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from utils import logger
-
-try:
-    from flux2_blackbox_runtime import Flux2KleinKVPipeline
-except Exception:  # pragma: no cover
-    Flux2KleinKVPipeline = None
 
 try:
     from setproctitle import setproctitle as _setproctitle
@@ -42,6 +54,7 @@ IMAGENET_PREPROCESS = (
 )
 DEFAULT_FLUX_FP8_REVISION = "886954cb9d8e8566f6facb7ef61bee7199e5e4bb"
 VIS_SAVE_SIZE = 224
+_THIRD_PARTY_HF_DIFFUSERS = _REPO_ROOT / "third_party" / "hf_diffusers_git"
 MODEL_NAME_ALIASES = {
     "resnet50": "resnet50",
     "convnext": "convnext",
@@ -67,6 +80,14 @@ MODEL_NAME_ALIASES = {
     "deit_base": "deit-b",
     "mambavision": "mambavision",
     "mamba-vision": "mambavision",
+    "clip": "clip",
+    "openai-clip": "clip",
+    "clip-vit-base-patch16": "clip",
+    "clip-vit-b-16": "clip",
+    "openai/clip-vit-base-patch16": "clip",
+    "siglip2": "siglip2",
+    "siglip2-base-patch16-224": "siglip2",
+    "google/siglip2-base-patch16-224": "siglip2",
 }
 
 
@@ -250,6 +271,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpu_offload", action="store_true")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--save_dir", type=str, default="prompt_transfer_eval_multi")
+    parser.add_argument(
+        "--save_clean_batch",
+        type=str,
+        choices=["on", "off"],
+        default="on",
+        help=(
+            "Store resized clean images in each label cache. 'off' keeps only "
+            "adv_batch and reloads clean images from image_paths during evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--resume_render_cache",
+        action="store_true",
+        help="Skip valid label_*.npz files that already exist in the render cache.",
+    )
     parser.add_argument(
         "--start_iteration",
         type=int,
@@ -678,7 +714,48 @@ def align_classifier_logits_for_eval(model_name: Optional[str], logits: np.ndarr
     return logits
 
 
-def build_art_classifier(model_name: str, res: int, device: str) -> PyTorchClassifier:
+def build_prompt_ensemble_classifier(model_name: str, device: str):
+    normalized_model_name = normalize_model_name(model_name)
+    if normalized_model_name not in {"clip", "siglip2"}:
+        raise ValueError(
+            f"prompt-ensemble classifier does not support '{model_name}'"
+        )
+
+    isolated_root = _REPO_ROOT / "isolated_vlm_attack"
+    isolated_root_str = str(isolated_root)
+    if isolated_root_str not in sys.path:
+        sys.path.insert(0, isolated_root_str)
+
+    from isolated_vlm_attack.attack_runner_common import (
+        OPENAI_CLIP_IMAGENET_MODEL_ID,
+        SIGLIP2_IMAGENET_MODEL_ID,
+        _OpenAIClipImageNetClassifier,
+        _Siglip2ImageNetClassifier,
+    )
+
+    if normalized_model_name == "clip":
+        classifier_type = _OpenAIClipImageNetClassifier
+        model_id = OPENAI_CLIP_IMAGENET_MODEL_ID
+    else:
+        classifier_type = _Siglip2ImageNetClassifier
+        model_id = SIGLIP2_IMAGENET_MODEL_ID
+
+    logger.log(
+        "building ImageNet prompt-ensemble classifier | "
+        f"model_name={normalized_model_name} | model_id={model_id}"
+    )
+    return classifier_type(model_id=model_id, device=torch.device(device))
+
+
+def build_art_classifier(model_name: str, res: int, device: str):
+    normalized_model_name = normalize_model_name(model_name)
+    if normalized_model_name in {"clip", "siglip2"}:
+        return build_prompt_ensemble_classifier(normalized_model_name, device)
+
+    if PyTorchClassifier is None:
+        raise ImportError(
+            "adversarial-robustness-toolbox is required for transfer evaluation"
+        )
     model = load_classifier_model(model_name, device)
     device_type = "gpu" if device.startswith("cuda") else "cpu"
     return PyTorchClassifier(
@@ -699,7 +776,17 @@ def load_flux_pipeline(
     hf_token: Optional[str],
     cpu_offload: bool,
 ):
-    if Flux2KleinKVPipeline is None:
+    if _THIRD_PARTY_HF_DIFFUSERS.is_dir():
+        third_party_diffusers = str(_THIRD_PARTY_HF_DIFFUSERS)
+        if third_party_diffusers not in sys.path:
+            sys.path.insert(0, third_party_diffusers)
+    try:
+        importlib.import_module("regex")
+    except Exception:
+        pass
+    diffusers_module = importlib.import_module("diffusers")
+    pipeline_cls = getattr(diffusers_module, "Flux2KleinKVPipeline", None)
+    if pipeline_cls is None:
         raise ImportError("Flux2KleinKVPipeline is not available in the current diffusers build.")
 
     use_cuda = device.startswith("cuda")
@@ -712,7 +799,7 @@ def load_flux_pipeline(
     if use_cuda and not cpu_offload:
         load_kwargs["device_map"] = "balanced"
 
-    pipe = Flux2KleinKVPipeline.from_pretrained(model_path, **load_kwargs)
+    pipe = pipeline_cls.from_pretrained(model_path, **load_kwargs)
     if use_cuda and cpu_offload:
         pipe.enable_sequential_cpu_offload()
     elif not use_cuda and hasattr(pipe, "to"):
@@ -1187,12 +1274,14 @@ def generate_label_payload(
             eval_size=int(args.eval_size),
         )
 
-    render_artifact = prepare_render_artifact(
-        pipe=pipe,
-        record=record,
-        artifact_type=artifact_type,
-        max_sequence_length=int(args.max_sequence_length),
-    )
+    render_artifact = context.get("prepared_render_artifact")
+    if render_artifact is None:
+        render_artifact = prepare_render_artifact(
+            pipe=pipe,
+            record=record,
+            artifact_type=artifact_type,
+            max_sequence_length=int(args.max_sequence_length),
+        )
 
     class_clean_images: List[np.ndarray] = []
     class_adv_images: List[np.ndarray] = []
@@ -1293,21 +1382,46 @@ def get_render_cache_path(cache_dir: Path, label: int) -> Path:
     return cache_dir / f"label_{int(label):04d}.npz"
 
 
-def save_label_payload_cache(cache_dir: Path, payload: Dict[str, object]) -> None:
+def clean_batch_saving_enabled(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def save_label_payload_cache(
+    cache_dir: Path,
+    payload: Dict[str, object],
+    *,
+    save_clean_batch: bool = True,
+) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = get_render_cache_path(cache_dir, int(payload["ground_label"]))
-    np.savez(
-        cache_path,
-        clean_batch=np.asarray(payload["clean_batch"], dtype=np.float32),
-        adv_batch=np.asarray(payload["adv_batch"], dtype=np.float32),
-        label_batch=np.asarray(payload["label_batch"], dtype=np.int64),
-        image_paths=np.asarray(payload["image_paths"], dtype=np.str_),
-        ground_label=np.asarray([int(payload["ground_label"])], dtype=np.int64),
-        ground_class_name=np.asarray([str(payload.get("ground_class_name") or "")], dtype=np.str_),
-        artifact_type=np.asarray([str(payload.get("artifact_type") or "")], dtype=np.str_),
-        artifact_prompt_for_log=np.asarray([str(payload.get("artifact_prompt_for_log") or "")], dtype=np.str_),
-        generation_failures=np.asarray([int(payload.get("generation_failures", 0))], dtype=np.int64),
-    )
+    arrays = {
+        "adv_batch": np.asarray(payload["adv_batch"], dtype=np.float32),
+        "label_batch": np.asarray(payload["label_batch"], dtype=np.int64),
+        "image_paths": np.asarray(payload["image_paths"], dtype=np.str_),
+        "ground_label": np.asarray([int(payload["ground_label"])], dtype=np.int64),
+        "ground_class_name": np.asarray(
+            [str(payload.get("ground_class_name") or "")],
+            dtype=np.str_,
+        ),
+        "artifact_type": np.asarray(
+            [str(payload.get("artifact_type") or "")],
+            dtype=np.str_,
+        ),
+        "artifact_prompt_for_log": np.asarray(
+            [str(payload.get("artifact_prompt_for_log") or "")],
+            dtype=np.str_,
+        ),
+        "generation_failures": np.asarray(
+            [int(payload.get("generation_failures", 0))],
+            dtype=np.int64,
+        ),
+        "clean_batch_saved": np.asarray([bool(save_clean_batch)], dtype=np.bool_),
+    }
+    if save_clean_batch:
+        arrays["clean_batch"] = np.asarray(payload["clean_batch"], dtype=np.float32)
+    np.savez(cache_path, **arrays)
 
 
 def load_label_payload_cache(cache_dir: Path, label: int) -> Dict[str, object]:
@@ -1315,17 +1429,55 @@ def load_label_payload_cache(cache_dir: Path, label: int) -> Dict[str, object]:
     with np.load(cache_path, allow_pickle=False) as payload:
         ground_class_name = str(payload["ground_class_name"][0])
         artifact_type = str(payload["artifact_type"][0])
+        clean_batch = (
+            payload["clean_batch"].astype(np.float32, copy=False)
+            if "clean_batch" in payload.files
+            else None
+        )
         return {
             "ground_label": int(payload["ground_label"][0]),
             "ground_class_name": ground_class_name or None,
             "artifact_type": artifact_type or None,
             "artifact_prompt_for_log": str(payload["artifact_prompt_for_log"][0]),
-            "clean_batch": payload["clean_batch"].astype(np.float32, copy=False),
+            "clean_batch": clean_batch,
             "adv_batch": payload["adv_batch"].astype(np.float32, copy=False),
             "label_batch": payload["label_batch"].astype(np.int64, copy=False),
             "image_paths": payload["image_paths"].astype(str).tolist(),
             "generation_failures": int(payload["generation_failures"][0]),
         }
+
+
+def load_clean_batch_from_image_paths(
+    image_paths: Sequence[str],
+    eval_size: int,
+) -> np.ndarray:
+    clean_images: List[np.ndarray] = []
+    for image_path_str in image_paths:
+        with Image.open(Path(image_path_str)) as opened:
+            clean_images.append(pil_to_nchw01(opened.convert("RGB"), int(eval_size)))
+    if not clean_images:
+        return np.empty((0, 3, int(eval_size), int(eval_size)), dtype=np.float32)
+    return np.stack(clean_images, axis=0).astype(np.float32)
+
+
+def is_valid_label_payload_cache(
+    cache_path: Path,
+    *,
+    expected_count: int = 0,
+) -> bool:
+    if not cache_path.is_file():
+        return False
+    try:
+        with np.load(cache_path, allow_pickle=False) as payload:
+            required = {"adv_batch", "label_batch", "image_paths", "ground_label"}
+            if not required.issubset(set(payload.files)):
+                return False
+            rendered_count = int(payload["adv_batch"].shape[0])
+            if rendered_count != int(payload["label_batch"].shape[0]):
+                return False
+            return int(expected_count) <= 0 or rendered_count == int(expected_count)
+    except Exception:
+        return False
 
 
 def build_render_cache(
@@ -1360,12 +1512,24 @@ def build_render_cache(
             current_idx=start_iteration + offset + 1,
             total_count=total_labels,
         )
+        cache_path = get_render_cache_path(cache_dir, int(label))
+        if bool(getattr(args, "resume_render_cache", False)) and is_valid_label_payload_cache(
+            cache_path,
+            expected_count=max(0, int(getattr(args, "max_images_per_class", 0))),
+        ):
+            continue
         if rerender_cwor_only:
             record = success_records.get(int(label)) if isinstance(success_records, dict) else None
             if not isinstance(record, dict) or not bool(record.get("is_cwor_success", False)):
                 continue
         payload = generate_label_payload(args=args, context=context, label=int(label), pipe=pipe)
-        save_label_payload_cache(cache_dir=cache_dir, payload=payload)
+        save_label_payload_cache(
+            cache_dir=cache_dir,
+            payload=payload,
+            save_clean_batch=clean_batch_saving_enabled(
+                getattr(args, "save_clean_batch", "on")
+            ),
+        )
     _set_eval_process_title(
         "rc_done",
         cache_model_name,
@@ -1509,9 +1673,13 @@ def evaluate_transfer(
     total_generation_failures = 0
     total_vis_saved = 0
     per_class_results: List[Dict[str, object]] = []
+    clean_correct_records: List[Dict[str, object]] = []
+    attack_success_records: List[Dict[str, object]] = []
     evaluated_label_clean_accs: List[float] = []
     evaluated_label_adv_accs: List[float] = []
     evaluated_label_attack_success_rates: List[float] = []
+    cached_clean_label_count = 0
+    reloaded_clean_label_count = 0
     vis_max_images = max(0, int(args.vis_max_images))
 
     for offset, label in enumerate(
@@ -1560,6 +1728,23 @@ def evaluate_transfer(
             )
             continue
 
+        if clean_batch is None:
+            clean_batch = load_clean_batch_from_image_paths(
+                image_paths=image_paths,
+                eval_size=int(args.eval_size),
+            )
+            reloaded_clean_label_count += 1
+        else:
+            cached_clean_label_count += 1
+        if int(clean_batch.shape[0]) != int(label_batch.shape[0]):
+            raise ValueError(
+                "clean/image count mismatch for label {}: clean={} labels={}".format(
+                    label,
+                    int(clean_batch.shape[0]),
+                    int(label_batch.shape[0]),
+                )
+            )
+
         combined_batch = np.concatenate((clean_batch, adv_batch), axis=0).astype(np.float32, copy=False)
         combined_pred = classifier.predict(combined_batch, batch_size=int(args.batch_size))
         combined_pred = align_classifier_logits_for_eval(model_name, combined_pred)
@@ -1607,6 +1792,29 @@ def evaluate_transfer(
         class_attack_success = int(np.sum(attack_success_mask))
         class_total = int(label_batch.shape[0])
 
+        for sample_offset, image_path_str in enumerate(image_paths):
+            if not bool(clean_correct_mask[sample_offset]):
+                continue
+            sample_record = {
+                "image_path": str(image_path_str),
+                "edited_cache_path": (
+                    str(get_render_cache_path(Path(cache_dir), label))
+                    if cache_dir is not None
+                    else None
+                ),
+                "edited_cache_index": int(sample_offset),
+                "ground_label": int(label_batch[sample_offset]),
+                "ground_class_name": ground_class_name,
+                "clean_pred": int(clean_idx[sample_offset]),
+                "adv_pred": int(adv_idx[sample_offset]),
+                "attack_success": bool(attack_success_mask[sample_offset]),
+                "artifact_type": artifact_type,
+                "prompt": artifact_prompt_for_log,
+            }
+            clean_correct_records.append(sample_record)
+            if bool(attack_success_mask[sample_offset]):
+                attack_success_records.append(sample_record)
+
         total_images += class_total
         total_clean_correct += class_clean_correct
         total_adv_correct += class_adv_correct
@@ -1620,6 +1828,10 @@ def evaluate_transfer(
             "ground_label": label,
             "ground_class_name": ground_class_name,
             "artifact_type": artifact_type,
+            "total_count": int(class_total),
+            "clean_correct_count": int(class_clean_correct),
+            "adv_correct_count": int(class_adv_correct),
+            "attack_success_count": int(class_attack_success),
             "clean_acc": 100.0 * float(class_clean_correct) / float(class_total),
             "adv_acc": 100.0 * float(class_adv_correct) / float(class_total),
             "attack_success_rate": class_attack_success_rate,
@@ -1665,6 +1877,9 @@ def evaluate_transfer(
         )
 
     summary = {
+        "total_image_count": int(total_images),
+        "clean_correct_count": int(total_clean_correct),
+        "attack_success_count": int(total_attack_success),
         "clean_acc": 100.0 * float(total_clean_correct) / float(total_images),
         "adv_acc": 100.0 * float(total_adv_correct) / float(total_images),
         "attack_success_rate": (
@@ -1680,12 +1895,36 @@ def evaluate_transfer(
         "saved_visualization_count": int(total_vis_saved),
         "vis_max_images": int(vis_max_images),
         "generation_failures": int(total_generation_failures),
+        "cached_clean_label_count": int(cached_clean_label_count),
+        "reloaded_clean_label_count": int(reloaded_clean_label_count),
+        "attack_success_numerator_definition": (
+            "clean_pred == ground_label and adv_pred != ground_label"
+        ),
+        "attack_success_denominator_definition": "clean_pred == ground_label",
     }
 
     summary_path = save_dir / "summary.json"
     per_class_path = save_dir / "per_class_results.json"
+    clean_correct_path = save_dir / "clean_correct_samples.jsonl"
+    attack_success_path = save_dir / "attack_success_samples.jsonl"
+    summary["clean_correct_samples_path"] = str(clean_correct_path)
+    summary["attack_success_samples_path"] = str(attack_success_path)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     per_class_path.write_text(json.dumps(per_class_results, ensure_ascii=False, indent=2), encoding="utf-8")
+    clean_correct_path.write_text(
+        "".join(
+            json.dumps(record, ensure_ascii=False) + "\n"
+            for record in clean_correct_records
+        ),
+        encoding="utf-8",
+    )
+    attack_success_path.write_text(
+        "".join(
+            json.dumps(record, ensure_ascii=False) + "\n"
+            for record in attack_success_records
+        ),
+        encoding="utf-8",
+    )
     _set_eval_process_title("done", model_name, current_idx=total_labels, total_count=total_labels)
 
     logger.log("***********************************************************")

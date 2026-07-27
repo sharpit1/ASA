@@ -45,6 +45,9 @@ run_args:
   qwen_true_cfg_scale: 4.0
   qwen_negative_prompt: " "
   qwen_num_images_per_prompt: 1
+  # Experimental single-GPU batching for distinct candidate prompts.
+  qwen_batch_size: 3
+  qwen_batch_fallback: true
   num_inference_steps: 4
 
   # Match Flux2 VLM preset: generate edit-instruction candidates with scene vocab.

@@ -78,6 +78,14 @@ while [[ $i -lt ${#RAW_ARGS[@]} ]]; do
     --attack_mode=*)
       ATTACK_MODE="${arg#--attack_mode=}"
       ;;
+    --class_ablation)
+      i=$((i + 1))
+      require_cli_value --class_ablation "$i" "${#RAW_ARGS[@]}"
+      CLASS_ABLATION="${RAW_ARGS[$i]}"
+      ;;
+    --class_ablation=*)
+      CLASS_ABLATION="${arg#--class_ablation=}"
+      ;;
     --run_name)
       i=$((i + 1))
       require_cli_value --run_name "$i" "${#RAW_ARGS[@]}"
@@ -110,9 +118,7 @@ while [[ $i -lt ${#RAW_ARGS[@]} ]]; do
     --save_intermediate|--save_intermediate=*|--save_intermediate_interval|--save_intermediate_interval=*|\
     --save_candidate_strips|--save_candidate_strips=*|--capture_classifier_tile_image|--capture_classifier_tile_image=*|\
     --gcg_save_intermediate|--gcg_save_intermediate=*|--gcg_save_intermediate_interval|--gcg_save_intermediate_interval=*|\
-    --gcg_save_candidate_strips|--gcg_save_candidate_strips=*|--gcg_capture_classifier_tile_image|--gcg_capture_classifier_tile_image=*|\
-    --gcg_eval_naturalness_llm_thinking|--gcg_eval_naturalness_llm_thinking=*|\
-    --gcg_eval_naturalness_on_attack_success|--gcg_eval_naturalness_on_attack_success=*)
+    --gcg_save_candidate_strips|--gcg_save_candidate_strips=*|--gcg_capture_classifier_tile_image|--gcg_capture_classifier_tile_image=*)
       echo "ERROR: removed launcher option is not supported: $arg" >&2
       exit 1
       ;;
@@ -168,8 +174,6 @@ forbidden_keys = {
     "save_intermediate_interval",
     "save_candidate_strips",
     "capture_classifier_tile_image",
-    "gcg_eval_naturalness_llm_thinking",
-    "gcg_eval_naturalness_on_attack_success",
     "gcg_early_stop_on_cwor_success_only",
     "latent_nudging_scalar",
 }
@@ -211,6 +215,7 @@ mapping = {
     "max_samples": "MAX_SAMPLES",
     "sample_indices": "SAMPLE_INDICES",
     "sample_indices_file": "SAMPLE_INDICES_FILE",
+    "attack_only_clean_correct": "ATTACK_ONLY_CLEAN_CORRECT",
     "image_size": "IMAGE_SIZE",
     "saved_image_size": "SAVED_IMAGE_SIZE",
     "batchsize": "BATCHSIZE",
@@ -238,6 +243,7 @@ mapping = {
     "gcg_scene_vocab_prompts_per_strategy": "GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY",
     "gcg_scene_vocab_enabled_strategies": "GCG_SCENE_VOCAB_ENABLED_STRATEGIES",
     "gcg_slot_candidate_max_words": "GCG_SLOT_CANDIDATE_MAX_WORDS",
+    "class_ablation": "CLASS_ABLATION",
     "gcg_candidate_source": "GCG_CANDIDATE_SOURCE",
     "gcg_scene_vocab_feedback": "GCG_SCENE_VOCAB_FEEDBACK",
     "gcg_scene_feedback_limit": "GCG_SCENE_FEEDBACK_LIMIT",
@@ -256,10 +262,14 @@ mapping = {
     "gcg_scene_llm_thinking": "GCG_SCENE_LLM_THINKING",
     "gcg_scene_llm_do_sample": "GCG_SCENE_LLM_DO_SAMPLE",
     "gcg_early_stop_on_attack_success": "GCG_EARLY_STOP_ON_ATTACK_SUCCESS",
+    "gcg_eval_naturalness_on_attack_success": "GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS",
+    "gcg_eval_naturalness_llm_thinking": "GCG_EVAL_NATURALNESS_LLM_THINKING",
     # Qwen Image Edit.
     "qwen_true_cfg_scale": "QWEN_TRUE_CFG_SCALE",
     "qwen_negative_prompt": "QWEN_NEGATIVE_PROMPT",
     "qwen_num_images_per_prompt": "QWEN_NUM_IMAGES_PER_PROMPT",
+    "qwen_batch_size": "QWEN_BATCH_SIZE",
+    "qwen_batch_fallback": "QWEN_BATCH_FALLBACK",
     # Bernini.
     "bernini_root": "BERNINI_ROOT",
     "bernini_config": "BERNINI_CONFIG",
@@ -354,12 +364,22 @@ END_INDEX="${END_INDEX:-}"
 MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 SAMPLE_INDICES="${SAMPLE_INDICES:-}"
 SAMPLE_INDICES_FILE="${SAMPLE_INDICES_FILE:-}"
+ATTACK_ONLY_CLEAN_CORRECT="${ATTACK_ONLY_CLEAN_CORRECT:-0}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 BATCHSIZE="${BATCHSIZE:-1}"
 VICTIM_MODEL="${VICTIM_MODEL:-resnet50}"
 DEVICE="${DEVICE:-cuda}"
 CLASSIFIER_OBJECTIVE="${CLASSIFIER_OBJECTIVE:-ce_max}"
 MANUAL_SEED="${MANUAL_SEED:-}"
+
+case "${ATTACK_ONLY_CLEAN_CORRECT,,}" in
+  1|true|yes|on) ATTACK_ONLY_CLEAN_CORRECT="1" ;;
+  0|false|no|off|'') ATTACK_ONLY_CLEAN_CORRECT="0" ;;
+  *)
+    echo "ERROR: ATTACK_ONLY_CLEAN_CORRECT must be boolean-like (got '$ATTACK_ONLY_CLEAN_CORRECT')." >&2
+    exit 1
+    ;;
+esac
 
 ATTACK_MODE="${ATTACK_MODE:-vlm}"
 case "${ATTACK_MODE,,}" in
@@ -437,9 +457,20 @@ GCG_SCENE_VOCAB_SIZE="${GCG_SCENE_VOCAB_SIZE:-100}"
 GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY="${GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY:-0}"
 GCG_SCENE_VOCAB_ENABLED_STRATEGIES="${GCG_SCENE_VOCAB_ENABLED_STRATEGIES:-all}"
 GCG_SLOT_CANDIDATE_MAX_WORDS="${GCG_SLOT_CANDIDATE_MAX_WORDS:-5}"
+CLASS_ABLATION="${CLASS_ABLATION:-0}"
 GCG_SCENE_VOCAB_FEEDBACK="${GCG_SCENE_VOCAB_FEEDBACK:-1}"
 GCG_SCENE_FEEDBACK_LIMIT="${GCG_SCENE_FEEDBACK_LIMIT:-1000}"
 GCG_CANDIDATE_SOURCE="${GCG_CANDIDATE_SOURCE:-}"
+GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS="${GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS:-0}"
+GCG_EVAL_NATURALNESS_LLM_THINKING="${GCG_EVAL_NATURALNESS_LLM_THINKING:-0}"
+case "${CLASS_ABLATION,,}" in
+  1|true|yes|on) CLASS_ABLATION="1" ;;
+  0|false|no|off|'') CLASS_ABLATION="0" ;;
+  *)
+    echo "ERROR: CLASS_ABLATION must be boolean-like (got '$CLASS_ABLATION')." >&2
+    exit 1
+    ;;
+esac
 if [[ "$ATTACK_MODE" == "and" ]]; then
   GCG_CANDIDATE_SOURCE="gemma_scene_vocab"
   if [[ "$GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY" == "0" ]]; then
@@ -547,9 +578,11 @@ Core environment overrides:
   CONFIG, RUNNER_VARIANT, CUDA_VISIBLE_DEVICES
   DATASET_ROOT, DATASET_NAME, OUTPUT_ROOT, RUN_NAME
   START_INDEX, END_INDEX, MAX_SAMPLES, SAMPLE_INDICES, SAMPLE_INDICES_FILE
+  ATTACK_ONLY_CLEAN_CORRECT
   IMAGE_SIZE, BATCHSIZE, VICTIM_MODEL, DEVICE, CLASSIFIER_OBJECTIVE
   ATTACK_MODE, PROMPT, GCG_WORD, GCG_OCCURRENCE, GCG_STEPS
-  GCG_BATCH_SIZE, MAX_VICTIM_QUERIES, MODEL_PATH
+  GCG_BATCH_SIZE, MAX_VICTIM_QUERIES, MODEL_PATH, CLASS_ABLATION
+  GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS, GCG_EVAL_NATURALNESS_LLM_THINKING
   HEIGHT, WIDTH, NUM_INFERENCE_STEPS, MAX_SEQUENCE_LENGTH
   GUIDANCE_SCALE, CPU_OFFLOAD
   HF_TOKEN, HF_TOKEN_FILE, HF_TOKEN_ENV_NAME, HF_CACHE_ROOT
@@ -569,6 +602,7 @@ CMD=(
   --output_root "$OUTPUT_ROOT"
   --run_name "$RUN_NAME"
   --start_index "$START_INDEX"
+  --attack_only_clean_correct "$ATTACK_ONLY_CLEAN_CORRECT"
   --image_size "$IMAGE_SIZE"
   --batchsize "$BATCHSIZE"
   --victim_model "$VICTIM_MODEL"
@@ -586,6 +620,7 @@ CMD=(
   --gcg_scene_vocab_prompts_per_strategy "$GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY"
   --gcg_scene_vocab_enabled_strategies "$GCG_SCENE_VOCAB_ENABLED_STRATEGIES"
   --gcg_slot_candidate_max_words "$GCG_SLOT_CANDIDATE_MAX_WORDS"
+  --class_ablation "$CLASS_ABLATION"
   --gcg_candidate_source "$GCG_CANDIDATE_SOURCE"
   --gcg_scene_feedback_limit "$GCG_SCENE_FEEDBACK_LIMIT"
   --scene_vlm_question "$SCENE_VLM_QUESTION"
@@ -644,6 +679,8 @@ append_optional GCG_SCENE_LLM_MAX_NEW_TOKENS --gcg_scene_llm_max_new_tokens
 append_optional GCG_SCENE_LLM_THINKING --gcg_scene_llm_thinking
 append_optional GCG_SCENE_LLM_DO_SAMPLE --gcg_scene_llm_do_sample
 append_optional GCG_EARLY_STOP_ON_ATTACK_SUCCESS --gcg_early_stop_on_attack_success
+append_optional GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS --gcg_eval_naturalness_on_attack_success
+append_optional GCG_EVAL_NATURALNESS_LLM_THINKING --gcg_eval_naturalness_llm_thinking
 append_optional WANDB_ENTITY --wandb_entity
 append_optional WANDB_GROUP --wandb_group
 append_optional WANDB_TAGS --wandb_tags
@@ -653,6 +690,8 @@ case "$RUNNER_SCRIPT" in
     append_optional QWEN_TRUE_CFG_SCALE --qwen_true_cfg_scale
     append_optional QWEN_NEGATIVE_PROMPT --qwen_negative_prompt
     append_optional QWEN_NUM_IMAGES_PER_PROMPT --qwen_num_images_per_prompt
+    append_optional QWEN_BATCH_SIZE --qwen_batch_size
+    append_optional QWEN_BATCH_FALLBACK --qwen_batch_fallback
     ;;
   bernini_attack_runner.py)
     append_optional BERNINI_ROOT --bernini_root

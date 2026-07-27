@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple
 
@@ -59,6 +60,16 @@ class BlackboxRuntime(Protocol):
         slot_kind: str,
         fallback_word: str,
     ) -> Tuple[str, str, Optional[str]]:
+        ...
+
+    def evaluate_naturalness(
+        self,
+        *,
+        image_path: Path,
+        candidate_prompt: str,
+        args: argparse.Namespace,
+        is_source_vs_edited_comparison: bool = False,
+    ) -> Tuple[Optional[bool], str, str, Optional[str]]:
         ...
 
     def evaluate_candidates(
@@ -212,20 +223,31 @@ def build_core_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gcg_scene_vocab_enabled_strategies", type=str, default="all")
     parser.add_argument("--gcg_slot_candidate_max_words", type=int, default=5)
     parser.add_argument("--gcg_candidate_source", type=str, default="vlm_query")
+    parser.add_argument("--class_ablation", type=parse_bool_flag, default=False)
     parser.add_argument("--attack_mode", choices=["vlm", "and"], default="vlm")
     parser.add_argument("--gcg_scene_vocab_topic", type=str, default=None)
     parser.add_argument("--gcg_scene_feedback_limit", type=int, default=1000)
     parser.add_argument("--gcg_early_stop_on_attack_success", type=parse_bool_flag, default=False)
+    parser.add_argument(
+        "--gcg_eval_naturalness_on_attack_success",
+        type=parse_bool_flag,
+        default=False,
+    )
+    parser.add_argument(
+        "--gcg_eval_naturalness_llm_thinking",
+        type=parse_bool_flag,
+        default=False,
+    )
     parser.add_argument("--gcg_scene_vocab_feedback", type=parse_bool_flag, default=False)
 
-    parser.add_argument("--gcg_scene_llm_model_id", type=str, default="google/gemma-4-e4b-it")
+    parser.add_argument("--gcg_scene_llm_model_id", type=str, default="google/gemma-4-E4B-it")
     parser.add_argument("--gcg_scene_llm_backend", type=str, default="gemma4")
     parser.add_argument("--gcg_scene_llm_device", type=str, default="auto")
     parser.add_argument("--gcg_scene_llm_max_new_tokens", type=int, default=4096)
     parser.add_argument("--gcg_scene_llm_thinking", type=parse_bool_flag, default=False)
     parser.add_argument("--gcg_scene_llm_do_sample", type=parse_bool_flag, default=False)
     parser.add_argument("--scene_vlm_backend", type=str, default="gemma4")
-    parser.add_argument("--scene_vlm_model_id", type=str, default="google/gemma-4-e4b-it")
+    parser.add_argument("--scene_vlm_model_id", type=str, default="google/gemma-4-E4B-it")
     parser.add_argument("--scene_vlm_device", type=str, default="auto")
     parser.add_argument("--scene_vlm_max_new_tokens", type=int, default=4096)
     parser.add_argument(
@@ -290,8 +312,6 @@ def parse_core_args(argv: Sequence[str]) -> Tuple[argparse.Namespace, List[str]]
         "--gcg_save_intermediate_interval",
         "--gcg_save_candidate_strips",
         "--gcg_capture_classifier_tile_image",
-        "--gcg_eval_naturalness_llm_thinking",
-        "--gcg_eval_naturalness_on_attack_success",
         "--gcg_early_stop_on_cwor_success_only",
     }
     for raw in unknown:
@@ -843,6 +863,49 @@ def candidate_image_for_saving(candidate: Dict[str, object]) -> Image.Image:
     raise ValueError("successful candidate has no evaluated image payload")
 
 
+def candidate_image_for_naturalness(candidate: Dict[str, object]) -> Image.Image:
+    """Return the full-resolution evaluated edit when available."""
+
+    for key in ("candidate_selected_image", "candidate_classifier_image"):
+        image = candidate.get(key)
+        if isinstance(image, Image.Image):
+            return image.convert("RGB").copy()
+
+    raw_path = str(candidate.get("candidate_precomputed_selected_image_path", "") or "").strip()
+    if raw_path:
+        path = Path(raw_path)
+        if path.is_file():
+            with Image.open(path) as opened:
+                return opened.convert("RGB").copy()
+
+    raise ValueError("candidate has no evaluated image payload for naturalness verification")
+
+
+def save_naturalness_comparison(
+    *,
+    source_image_path: Path,
+    candidate: Dict[str, object],
+    output_path: Path,
+) -> Path:
+    """Save a left-source/right-edit comparison without re-running the generator."""
+
+    source_path = Path(source_image_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"naturalness source image is missing: {source_path}")
+    edited = candidate_image_for_naturalness(candidate)
+    with Image.open(source_path) as opened:
+        source = opened.convert("RGB")
+    if source.size != edited.size:
+        source = source.resize(edited.size, Image.LANCZOS)
+    comparison = Image.new("RGB", (int(edited.width) * 2, int(edited.height)))
+    comparison.paste(source, (0, 0))
+    comparison.paste(edited, (int(edited.width), 0))
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    comparison.save(output)
+    return output
+
+
 def save_evaluated_attack_image(
     candidate: Dict[str, object],
     output_path: Path,
@@ -863,6 +926,48 @@ def save_evaluated_attack_image(
     return output
 
 
+def float32_path_for_attack_image(output_path: Path) -> Path:
+    """Return the sidecar path for the exact float32 classifier input."""
+
+    return Path(output_path).with_suffix(".float32.npy")
+
+
+def save_evaluated_attack_float32(
+    candidate: Dict[str, object],
+    output_path: Path,
+) -> Path:
+    """Save and verify the exact unbatched CHW float32 classifier input."""
+
+    raw_array = candidate.get("candidate_classifier_input_float32")
+    if raw_array is None:
+        raise ValueError("successful candidate has no float32 classifier input payload")
+    if isinstance(raw_array, torch.Tensor):
+        raw_array = raw_array.detach().cpu().numpy()
+    array = np.asarray(raw_array)
+    if array.dtype != np.float32:
+        raise ValueError(f"classifier input must have dtype float32, got {array.dtype}")
+    if array.ndim != 3 or int(array.shape[0]) != 3:
+        raise ValueError(
+            "classifier input must have unbatched CHW shape, "
+            f"got {tuple(int(dim) for dim in array.shape)}"
+        )
+
+    output = float32_path_for_attack_image(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    exact_array = np.array(array, dtype=np.float32, order="C", copy=True)
+    with output.open("wb") as handle:
+        np.save(handle, exact_array, allow_pickle=False)
+
+    restored = np.load(output, allow_pickle=False)
+    if (
+        restored.dtype != np.float32
+        or restored.shape != exact_array.shape
+        or not np.array_equal(restored, exact_array)
+    ):
+        raise RuntimeError("saved float32 classifier input failed exact round-trip verification")
+    return output
+
+
 
 
 def write_report(
@@ -877,6 +982,8 @@ def write_report(
     final_attack_success: Optional[bool],
     attack_success_image_path: Optional[str],
     attack_success_image_error: Optional[str],
+    attack_success_float32_path: Optional[str],
+    attack_success_float32_error: Optional[str],
     attack_success_query_count: Optional[int],
     attack_success_candidate: Optional[Dict[str, object]],
 ) -> None:
@@ -907,6 +1014,22 @@ def write_report(
         "gcg_word": str(args.gcg_word),
         "gcg_occurrence": int(args.gcg_occurrence),
         "attack_success_rule": attack_success_rule(str(args.classifier_objective)),
+        "attack_success_requires_naturalness": bool(
+            getattr(args, "gcg_eval_naturalness_on_attack_success", False)
+        ),
+        "naturalness_verifier": {
+            "enabled": bool(
+                getattr(args, "gcg_eval_naturalness_on_attack_success", False)
+            ),
+            "backend": str(getattr(args, "gcg_scene_llm_backend", "gemma4")),
+            "model_id": str(
+                getattr(args, "gcg_scene_llm_model_id", "google/gemma-4-E4B-it")
+            ),
+            "thinking": bool(
+                getattr(args, "gcg_eval_naturalness_llm_thinking", False)
+            ),
+            "do_sample": False,
+        },
         "victim_query_count": int(compute_victim_query_count(history)),
         "final_attack_success": final_attack_success,
         "early_stop": None if early_stop_event is None else dict(early_stop_event),
@@ -917,6 +1040,10 @@ def write_report(
         payload["attack_success_image_path"] = str(attack_success_image_path)
     if attack_success_image_error:
         payload["attack_success_image_error"] = str(attack_success_image_error)
+    if attack_success_float32_path:
+        payload["attack_success_float32_path"] = str(attack_success_float32_path)
+    if attack_success_float32_error:
+        payload["attack_success_float32_error"] = str(attack_success_float32_error)
     if attack_success_query_count is not None:
         payload["attack_success_query_count"] = int(attack_success_query_count)
     if attack_success_candidate is not None:
@@ -929,7 +1056,10 @@ def write_report(
 
 def contains_class_placeholder(text: str) -> bool:
     prompt = str(text or "")
-    return any(marker in prompt for marker in ("<class>", "{class}", "{class_name}"))
+    return any(
+        marker in prompt
+        for marker in ("<class>", "{class}", "{class_name}", "{target_class_name}")
+    )
 
 
 def apply_class_placeholder(text: str, class_name: str) -> str:
@@ -941,9 +1071,19 @@ def apply_class_placeholder(text: str, class_name: str) -> str:
         "<class>": value,
         "{class}": value,
         "{class_name}": value,
+        "{target_class_name}": value,
     }
     for marker, replacement in replacements.items():
         prompt = prompt.replace(marker, replacement)
+    return re.sub(r"\s+", " ", prompt).strip()
+
+
+def apply_class_ablation_placeholder(text: str) -> str:
+    """Replace explicit class placeholders with one fixed, neutral subject token."""
+
+    prompt = str(text or "")
+    for marker in ("<class>", "{class}", "{class_name}", "{target_class_name}"):
+        prompt = prompt.replace(marker, "the subject")
     return re.sub(r"\s+", " ", prompt).strip()
 
 
@@ -1103,6 +1243,14 @@ def merge_scene_vocab_feedback_history(
     generated_words: Sequence[str],
     scored_candidates: Sequence[Dict[str, object]],
 ) -> List[Dict[str, object]]:
+    def _copy_naturalness_fields(dst: Dict[str, object], src: Dict[str, object]) -> None:
+        naturalness = src.get("naturalness_is_natural")
+        if naturalness is not None:
+            dst["naturalness_is_natural"] = bool(naturalness)
+        feedback = str(src.get("naturalness_feedback", "") or "").strip()
+        if feedback:
+            dst["naturalness_feedback"] = feedback
+
     merged_by_word: Dict[str, Dict[str, object]] = {}
 
     for item in existing_feedback:
@@ -1114,8 +1262,10 @@ def merge_scene_vocab_feedback_history(
             "objective": scene_feedback_objective(item),
             "attempts": max(1, int(item.get("attempts", 1))),
         }
+        _copy_naturalness_fields(merged_by_word[scene_word], item)
 
     scored_objective_by_word: Dict[str, float] = {}
+    scored_feedback_by_word: Dict[str, Dict[str, object]] = {}
     for item in scored_candidates:
         scene_word = normalize_scene_vocab_word(str(item.get("candidate_word", "")))
         if len(scene_word) == 0:
@@ -1124,6 +1274,14 @@ def merge_scene_vocab_feedback_history(
         prev_objective = scored_objective_by_word.get(scene_word, float("-inf"))
         if objective > prev_objective:
             scored_objective_by_word[scene_word] = objective
+        naturalness = item.get("naturalness_is_natural")
+        feedback = str(item.get("naturalness_feedback", "") or "").strip()
+        if naturalness is not None or feedback:
+            scored_feedback = scored_feedback_by_word.setdefault(scene_word, {})
+            if naturalness is not None:
+                scored_feedback["naturalness_is_natural"] = bool(naturalness)
+            if feedback:
+                scored_feedback["naturalness_feedback"] = feedback
 
     for raw_word in generated_words:
         scene_word = normalize_scene_vocab_word(str(raw_word))
@@ -1137,11 +1295,18 @@ def merge_scene_vocab_feedback_history(
                 "objective": objective,
                 "attempts": 1,
             }
+            if scene_word in scored_feedback_by_word:
+                _copy_naturalness_fields(
+                    merged_by_word[scene_word],
+                    scored_feedback_by_word[scene_word],
+                )
             continue
         entry["attempts"] = max(1, int(entry.get("attempts", 1))) + 1
         prev_objective = scene_feedback_objective(entry)
         if objective is not None and (prev_objective is None or objective > prev_objective):
             entry["objective"] = objective
+        if scene_word in scored_feedback_by_word:
+            _copy_naturalness_fields(entry, scored_feedback_by_word[scene_word])
 
     for scene_word, objective in scored_objective_by_word.items():
         existing = merged_by_word.get(scene_word)
@@ -1149,18 +1314,36 @@ def merge_scene_vocab_feedback_history(
             prev_objective = scene_feedback_objective(existing)
             if objective is not None and (prev_objective is None or objective > prev_objective):
                 existing["objective"] = objective
+            if scene_word in scored_feedback_by_word:
+                _copy_naturalness_fields(existing, scored_feedback_by_word[scene_word])
             continue
         merged_by_word[scene_word] = {
             "scene_word": scene_word,
             "objective": objective,
             "attempts": 1,
         }
+        if scene_word in scored_feedback_by_word:
+            _copy_naturalness_fields(
+                merged_by_word[scene_word],
+                scored_feedback_by_word[scene_word],
+            )
 
     return list(merged_by_word.values())
 
 
 def _resolve_prompt(args: argparse.Namespace) -> str:
     editable_prompt = get_editable_prompt(args)
+    if bool(getattr(args, "class_ablation", False)):
+        editable_prompt = apply_class_ablation_placeholder(editable_prompt)
+        args.prompt = editable_prompt
+        if args.prompts:
+            args.prompts = [
+                apply_class_ablation_placeholder(prompt)
+                for prompt in args.prompts
+            ]
+        args.class_name = None
+        return editable_prompt
+
     has_class_placeholder = contains_class_placeholder(editable_prompt)
 
     resolved_class_name = str(args.class_name or "").strip()
@@ -1190,6 +1373,9 @@ def run_blackbox_attack_core(
     args.classifier_mode = "black-box"
     args.attack_mode = normalize_attack_mode(getattr(args, "attack_mode", "vlm"))
     args.generator_backend = validate_supported_generator(args.model_path)
+    naturalness_verifier_enabled = bool(
+        getattr(args, "gcg_eval_naturalness_on_attack_success", False)
+    )
     and_mode_enabled = bool(args.attack_mode == "and")
     args.gcg_candidate_source = (
         "gemma_scene_vocab"
@@ -1243,6 +1429,9 @@ def run_blackbox_attack_core(
     run_dir.mkdir(parents=True, exist_ok=True)
     if output_path.is_file():
         output_path.unlink()
+    stale_float32_path = float32_path_for_attack_image(output_path)
+    if stale_float32_path.is_file():
+        stale_float32_path.unlink()
 
     editable_prompt = _resolve_prompt(args)
     current_prompt = editable_prompt
@@ -1291,6 +1480,8 @@ def run_blackbox_attack_core(
     attack_success_observed = False
     attack_success_image_relpath: Optional[str] = None
     attack_success_image_error: Optional[str] = None
+    attack_success_float32_relpath: Optional[str] = None
+    attack_success_float32_error: Optional[str] = None
     attack_success_query_count: Optional[int] = None
     attack_success_candidate: Optional[Dict[str, object]] = None
     live_victim_query_count = 0
@@ -1301,6 +1492,8 @@ def run_blackbox_attack_core(
         nonlocal attack_success_observed
         nonlocal attack_success_image_relpath
         nonlocal attack_success_image_error
+        nonlocal attack_success_float32_relpath
+        nonlocal attack_success_float32_error
         nonlocal attack_success_query_count
         nonlocal attack_success_candidate
         nonlocal live_victim_query_count
@@ -1323,16 +1516,32 @@ def run_blackbox_attack_core(
             objective_mode=str(args.classifier_objective),
         ) is not True:
             return
-        attack_success_observed = True
-        if attack_success_query_count is None:
-            attack_success_query_count = int(live_victim_query_count)
-            attack_success_candidate = {
-                key: value
-                for key, value in candidate.items()
-                if not isinstance(value, Image.Image)
-            }
-        if attack_success_image_relpath is not None:
+        # Naturalness-enabled runs must not persist a raw classifier success.
+        # The returned candidate is verified synchronously below, then the
+        # exact approved image/float32 input is saved.
+        if naturalness_verifier_enabled:
             return
+        attack_success_observed = True
+        if attack_success_query_count is not None:
+            return
+        attack_success_query_count = int(live_victim_query_count)
+        attack_success_candidate = {
+            key: value
+            for key, value in candidate.items()
+            if not isinstance(value, (Image.Image, np.ndarray, torch.Tensor))
+        }
+        try:
+            saved_float32_path = save_evaluated_attack_float32(
+                dict(candidate),
+                output_path,
+            )
+            attack_success_float32_relpath = relpath_from_run_dir(
+                run_dir,
+                saved_float32_path,
+            )
+            attack_success_float32_error = None
+        except Exception as exc:
+            attack_success_float32_error = f"{type(exc).__name__}:{exc}"
         try:
             saved_path = save_evaluated_attack_image(
                 dict(candidate),
@@ -1343,6 +1552,23 @@ def run_blackbox_attack_core(
             attack_success_image_error = None
         except Exception as exc:
             attack_success_image_error = f"{type(exc).__name__}:{exc}"
+
+    def _classifier_attack_success(candidate: Dict[str, object]) -> bool:
+        return compute_attack_success(
+            pred_idx=candidate.get("pred_idx"),
+            classifier_label=args.classifier_label,
+            objective_mode=str(args.classifier_objective),
+        ) is True
+
+    def _candidate_attack_success_is_acceptable(candidate: Dict[str, object]) -> bool:
+        if not _classifier_attack_success(candidate):
+            return False
+        if not naturalness_verifier_enabled:
+            return True
+        return (
+            candidate.get("naturalness_is_natural") is True
+            and not str(candidate.get("naturalness_error", "") or "").strip()
+        )
 
     attack_success_rule_text = attack_success_rule(str(args.classifier_objective))
     step_prompts_path = run_dir / "step_prompts.json"
@@ -1745,17 +1971,84 @@ def run_blackbox_attack_core(
                     for key, value in dict(candidate_item).items()
                     if key not in {
                         "candidate_classifier_image",
+                        "candidate_classifier_input_float32",
                         "candidate_selected_image",
                         "candidate_precomputed_selected_image_path",
                     }
                 }
 
+            def _ensure_candidate_naturalness(
+                candidate_item: Dict[str, object],
+                *,
+                candidate_index: int,
+                phase: str,
+            ) -> None:
+                if not naturalness_verifier_enabled:
+                    return
+                if not _classifier_attack_success(candidate_item):
+                    return
+                if bool(candidate_item.get("naturalness_checked", False)):
+                    return
+
+                candidate_item["naturalness_checked"] = True
+                candidate_item["naturalness_model_id"] = str(
+                    getattr(args, "gcg_scene_llm_model_id", "google/gemma-4-E4B-it")
+                )
+                evaluator = getattr(runtime, "evaluate_naturalness", None)
+                if not callable(evaluator):
+                    candidate_item["naturalness_error"] = (
+                        "runtime_does_not_support_naturalness_verification"
+                    )
+                    return
+
+                try:
+                    with tempfile.TemporaryDirectory(
+                        prefix="asa_naturalness_"
+                    ) as naturalness_tmpdir:
+                        comparison_path = (
+                            Path(naturalness_tmpdir)
+                            / (
+                                f"step_{int(step) + 1:03d}_{str(phase)}_"
+                                f"candidate_{int(candidate_index):03d}.png"
+                            )
+                        )
+                        save_naturalness_comparison(
+                            source_image_path=Path(str(step_input_img_path)),
+                            candidate=candidate_item,
+                            output_path=comparison_path,
+                        )
+                        natural, feedback, raw_answer_naturalness, naturalness_error = evaluator(
+                            image_path=comparison_path,
+                            candidate_prompt=str(candidate_item.get("candidate_prompt", "")),
+                            args=args,
+                            is_source_vs_edited_comparison=True,
+                        )
+                except Exception as exc:
+                    candidate_item["naturalness_error"] = (
+                        f"{type(exc).__name__}:{exc}"
+                    )
+                    return
+
+                if natural is not None:
+                    candidate_item["naturalness_is_natural"] = bool(natural)
+                normalized_feedback = str(feedback or "").strip()
+                if normalized_feedback:
+                    candidate_item["naturalness_feedback"] = normalized_feedback
+                raw_answer_text = str(raw_answer_naturalness or "").strip()
+                if raw_answer_text:
+                    candidate_item["naturalness_raw_answer"] = raw_answer_text
+                if naturalness_error is not None:
+                    candidate_item["naturalness_error"] = str(naturalness_error)
+
             def _early_prompt_success_is_acceptable(candidate_item: Dict[str, object]) -> bool:
-                return compute_attack_success(
-                    pred_idx=candidate_item.get("pred_idx"),
-                    classifier_label=args.classifier_label,
-                    objective_mode=str(args.classifier_objective),
-                ) is True
+                return _candidate_attack_success_is_acceptable(candidate_item)
+
+            for prompt_candidate_idx, prompt_candidate in enumerate(prompt_scored_candidates):
+                _ensure_candidate_naturalness(
+                    prompt_candidate,
+                    candidate_index=prompt_candidate_idx,
+                    phase="prompt",
+                )
 
             prompt_success_early_stop = False
             if (
@@ -1823,6 +2116,13 @@ def run_blackbox_attack_core(
                 cwor_pre_candidates.extend(strategy_cwor_candidates)
                 if strategy_cwor_error:
                     cwor_pre_error = str(strategy_cwor_error)
+
+            for cwor_candidate_idx, cwor_candidate in enumerate(cwor_pre_candidates):
+                _ensure_candidate_naturalness(
+                    cwor_candidate,
+                    candidate_index=cwor_candidate_idx,
+                    phase="and",
+                )
 
             scored_candidates = list(prompt_scored_candidates)
             if len(cwor_pre_candidates) > 0:
@@ -2020,11 +2320,7 @@ def run_blackbox_attack_core(
             if attack_success_observed and len(scored_candidates) > 0:
                 if not attack_success_candidate or not attack_success_candidate.get("candidate_prompt"):
                     for success_idx, success_item in enumerate(scored_candidates):
-                        if compute_attack_success(
-                            pred_idx=success_item.get("pred_idx"),
-                            classifier_label=args.classifier_label,
-                            objective_mode=str(args.classifier_objective),
-                        ) is True:
+                        if _candidate_attack_success_is_acceptable(success_item):
                             attack_success_candidate = _json_safe_candidate(dict(success_item))
                             attack_success_query_count = _absolute_success_query_count(
                                 success_item,
@@ -2035,11 +2331,7 @@ def run_blackbox_attack_core(
             if not attack_success_observed and len(scored_candidates) > 0:
                 success_save_errors: List[str] = []
                 for success_idx, success_item in enumerate(scored_candidates):
-                    if compute_attack_success(
-                        pred_idx=success_item.get("pred_idx"),
-                        classifier_label=args.classifier_label,
-                        objective_mode=str(args.classifier_objective),
-                    ) is not True:
+                    if not _candidate_attack_success_is_acceptable(success_item):
                         continue
                     attack_success_observed = True
                     if attack_success_query_count is None:
@@ -2048,6 +2340,18 @@ def run_blackbox_attack_core(
                             success_idx,
                         )
                         attack_success_candidate = _json_safe_candidate(dict(success_item))
+                    try:
+                        saved_float32_path = save_evaluated_attack_float32(
+                            dict(success_item),
+                            output_path,
+                        )
+                        attack_success_float32_relpath = relpath_from_run_dir(
+                            run_dir,
+                            saved_float32_path,
+                        )
+                        attack_success_float32_error = None
+                    except Exception as exc:
+                        attack_success_float32_error = f"{type(exc).__name__}:{exc}"
                     try:
                         saved_path = save_evaluated_attack_image(
                             dict(success_item),
@@ -2066,11 +2370,7 @@ def run_blackbox_attack_core(
                 successful_indices = [
                     idx
                     for idx, item in enumerate(scored_candidates)
-                    if compute_attack_success(
-                        pred_idx=item.get("pred_idx"),
-                        classifier_label=args.classifier_label,
-                        objective_mode=str(args.classifier_objective),
-                    ) is True
+                    if _candidate_attack_success_is_acceptable(item)
                 ]
                 if bool(args.gcg_early_stop_on_attack_success) and successful_indices:
                     # The callback saved the first successful query, so keep
@@ -2103,10 +2403,15 @@ def run_blackbox_attack_core(
                 and best_pred_idx is not None
                 and int(candidate_pred_idx) != int(best_pred_idx)
             )
-            candidate_attack_success = compute_attack_success(
+            candidate_classifier_attack_success = compute_attack_success(
                 pred_idx=candidate_pred_idx,
                 classifier_label=args.classifier_label,
                 objective_mode=str(args.classifier_objective),
+            )
+            candidate_attack_success = (
+                _candidate_attack_success_is_acceptable(best_candidate)
+                if len(scored_candidates) > 0
+                else candidate_classifier_attack_success
             )
             early_stop_triggered = bool(
                 bool(args.gcg_early_stop_on_attack_success)
@@ -2171,10 +2476,29 @@ def run_blackbox_attack_core(
                 "target_logit": candidate_target_logit,
                 "target_label_logit": candidate_target_label_logit,
                 "ce": candidate_ce,
+                "classifier_attack_success": candidate_classifier_attack_success,
                 "attack_success": candidate_attack_success,
                 "attack_success_rule": attack_success_rule_text,
                 "early_stop_triggered": bool(early_stop_triggered),
             }
+            if bool(best_candidate.get("naturalness_checked", False)):
+                entry["attack_success_naturalness_checked"] = True
+                if best_candidate.get("naturalness_is_natural") is not None:
+                    entry["attack_success_image_natural"] = bool(
+                        best_candidate.get("naturalness_is_natural")
+                    )
+                if str(best_candidate.get("naturalness_feedback", "") or "").strip():
+                    entry["attack_success_naturalness_feedback"] = str(
+                        best_candidate.get("naturalness_feedback")
+                    )
+                if str(best_candidate.get("naturalness_raw_answer", "") or "").strip():
+                    entry["attack_success_naturalness_raw_answer"] = str(
+                        best_candidate.get("naturalness_raw_answer")
+                    )
+                if str(best_candidate.get("naturalness_error", "") or "").strip():
+                    entry["attack_success_naturalness_error"] = str(
+                        best_candidate.get("naturalness_error")
+                    )
             if cwor_base_confidence_for_step is not None:
                 entry["cwor_base_confidence"] = float(cwor_base_confidence_for_step)
                 entry["cwor_mode"] = str(cwor_mode)
@@ -2301,10 +2625,20 @@ def run_blackbox_attack_core(
                 "target_logit": candidate_target_logit,
                 "target_label_logit": candidate_target_label_logit,
                 "ce": candidate_ce,
+                "classifier_attack_success": candidate_classifier_attack_success,
                 "attack_success": candidate_attack_success,
                 "attack_success_rule": attack_success_rule_text,
                 "early_stop_triggered": bool(early_stop_triggered),
             }
+            for naturalness_key in (
+                "attack_success_naturalness_checked",
+                "attack_success_image_natural",
+                "attack_success_naturalness_feedback",
+                "attack_success_naturalness_raw_answer",
+                "attack_success_naturalness_error",
+            ):
+                if naturalness_key in entry:
+                    trace_step[naturalness_key] = entry[naturalness_key]
             if cwor_base_confidence_for_step is not None:
                 trace_step["cwor_base_confidence"] = float(cwor_base_confidence_for_step)
                 trace_step["cwor_mode"] = str(cwor_mode)
@@ -2358,6 +2692,14 @@ def run_blackbox_attack_core(
                 }
                 if candidate_attack_success is not None:
                     wandb_payload["flags/attack_success"] = 1 if bool(candidate_attack_success) else 0
+                if candidate_classifier_attack_success is not None:
+                    wandb_payload["flags/classifier_attack_success"] = (
+                        1 if bool(candidate_classifier_attack_success) else 0
+                    )
+                if best_candidate.get("naturalness_is_natural") is not None:
+                    wandb_payload["flags/naturalness_verified"] = (
+                        1 if bool(best_candidate.get("naturalness_is_natural")) else 0
+                    )
                 if early_stop_triggered:
                     wandb_payload["flags/early_stop"] = 1
                 if candidate_pred_logit is not None:
@@ -2401,6 +2743,7 @@ def run_blackbox_attack_core(
                     "pred_idx": None if candidate_pred_idx is None else int(candidate_pred_idx),
                     "classifier_label": int(args.classifier_label),
                     "attack_success_rule": attack_success_rule_text,
+                    "naturalness_required": bool(naturalness_verifier_enabled),
                 }
                 break
 
@@ -2414,6 +2757,11 @@ def run_blackbox_attack_core(
         final_attack_success = bool(attack_success_observed)
         if attack_success_observed and attack_success_image_relpath is None:
             attack_success_image_error = attack_success_image_error or "successful_candidate_image_not_saved"
+        if attack_success_observed and attack_success_float32_relpath is None:
+            attack_success_float32_error = (
+                attack_success_float32_error
+                or "successful_candidate_float32_not_saved"
+            )
         if attack_success_image_relpath is not None:
             if not output_path.is_file():
                 attack_success_image_error = "saved_attack_image_missing"
@@ -2424,6 +2772,23 @@ def run_blackbox_attack_core(
                         raise RuntimeError(
                             f"saved attack image must be 224x224, got {saved_image.size}"
                         )
+        float32_output_path = float32_path_for_attack_image(output_path)
+        if attack_success_float32_relpath is not None:
+            if not float32_output_path.is_file():
+                attack_success_float32_error = "saved_attack_float32_missing"
+                attack_success_float32_relpath = None
+            else:
+                restored_float32 = np.load(float32_output_path, allow_pickle=False)
+                expected_shape = (3, int(args.saved_image_size), int(args.saved_image_size))
+                if (
+                    restored_float32.dtype != np.float32
+                    or restored_float32.shape != expected_shape
+                ):
+                    raise RuntimeError(
+                        "saved attack float32 input must have "
+                        f"dtype=float32 and shape={expected_shape}, got "
+                        f"dtype={restored_float32.dtype}, shape={restored_float32.shape}"
+                    )
 
         if wandb_enabled and wandb_run is not None and output_path.is_file():
             wandb_enabled = log_wandb_final_image(
@@ -2443,6 +2808,8 @@ def run_blackbox_attack_core(
             final_attack_success=final_attack_success,
             attack_success_image_path=attack_success_image_relpath,
             attack_success_image_error=attack_success_image_error,
+            attack_success_float32_path=attack_success_float32_relpath,
+            attack_success_float32_error=attack_success_float32_error,
             attack_success_query_count=attack_success_query_count,
             attack_success_candidate=attack_success_candidate,
         )
@@ -2500,6 +2867,10 @@ def run_blackbox_attack_core(
             result["output_path"] = str(output_path)
         if attack_success_image_error is not None:
             result["attack_success_image_error"] = str(attack_success_image_error)
+        if attack_success_float32_relpath is not None:
+            result["attack_success_float32_path"] = str(attack_success_float32_relpath)
+        if attack_success_float32_error is not None:
+            result["attack_success_float32_error"] = str(attack_success_float32_error)
         if attack_success_query_count is not None:
             result["attack_success_query_count"] = int(attack_success_query_count)
         metrics_path = run_dir / "metrics.json"
@@ -2534,6 +2905,8 @@ def run_blackbox_attack_core(
                     final_attack_success=True,
                     attack_success_image_path=attack_success_image_relpath,
                     attack_success_image_error=attack_success_image_error,
+                    attack_success_float32_path=attack_success_float32_relpath,
+                    attack_success_float32_error=attack_success_float32_error,
                     attack_success_query_count=attack_success_query_count,
                     attack_success_candidate=attack_success_candidate,
                 )

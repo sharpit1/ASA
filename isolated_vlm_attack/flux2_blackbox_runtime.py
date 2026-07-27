@@ -2,6 +2,7 @@
 
 import gc
 import importlib
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -82,8 +83,10 @@ class Flux2KleinRenderSession:
 
         load_kwargs = {
             "torch_dtype": torch.float16,
-            "token": str(getattr(self.args, "hf_token", "") or ""),
         }
+        hf_token = str(getattr(self.args, "hf_token", "") or "").strip()
+        if hf_token:
+            load_kwargs["token"] = hf_token
         if not bool(getattr(self.args, "cpu_offload", False)):
             load_kwargs["device_map"] = "balanced"
         self.pipe = pipeline_cls.from_pretrained(model_path, **load_kwargs)
@@ -106,9 +109,12 @@ class Flux2KleinRenderSession:
         kwargs: Dict[str, object] = {
             "num_inference_steps": int(getattr(self.args, "num_inference_steps", 20)),
             "max_sequence_length": int(getattr(self.args, "max_sequence_length", 512)),
-            "guidance_scale": float(getattr(self.args, "guidance_scale", 3.0)),
             "output_type": "pil",
         }
+        if self.pipe is not None:
+            call_parameters = inspect.signature(self.pipe.__call__).parameters
+            if "guidance_scale" in call_parameters:
+                kwargs["guidance_scale"] = float(getattr(self.args, "guidance_scale", 3.0))
         height = int(getattr(self.args, "height", 0) or 0)
         width = int(getattr(self.args, "width", 0) or 0)
         if height > 0:
@@ -258,12 +264,18 @@ class Flux2KleinRenderSession:
                         image_01,
                         target_label=target_label,
                     )
+                exact_artifacts = module.classifier_evaluation_artifacts(classifier)
             except Exception as exc:
                 for result in evaluated_results:
                     result["cwor_strategy_query_count"] = int(query_count)
                 return evaluated_results, f"flux2_strategy_and:{type(exc).__name__}:{exc}"
 
-            evaluated_image = module.classifier_input_image(trial_image, classifier)
+            if not exact_artifacts:
+                evaluated_image = module.classifier_input_image(trial_image, classifier)
+                exact_artifacts = {
+                    "candidate_classifier_image": evaluated_image.copy(),
+                    "candidate_classifier_image_size": int(evaluated_image.size[0]),
+                }
             components = [
                 {
                     "strategy_name": str(item.get("candidate_strategy_name", "")),
@@ -289,8 +301,7 @@ class Flux2KleinRenderSession:
                     "ce": stats.get("ce"),
                     "candidate_variant": "cwor",
                     "candidate_selected_image": trial_image.copy(),
-                    "candidate_classifier_image": evaluated_image.copy(),
-                    "candidate_classifier_image_size": int(evaluated_image.size[0]),
+                    **exact_artifacts,
                     "candidate_selected_image_source": "flux2_strategy_and",
                     "cwor_strategy_merge_mode": "and",
                     "cwor_strategy_components": components,
@@ -414,6 +425,11 @@ class Flux2AttackRuntimeAdapter:
         module = self._get_module()
         kwargs["runtime_cache"] = self._runtime_cache
         return module.query_vlm_word(**kwargs)
+
+    def evaluate_naturalness(self, **kwargs):
+        module = self._get_module()
+        kwargs["runtime_cache"] = self._runtime_cache
+        return module.evaluate_attack_success_naturalness(**kwargs)
 
     def evaluate_candidates(self, **kwargs):
         module = self._get_module()

@@ -58,3 +58,5 @@ run_args:
   gcg_scene_llm_thinking: false
   gcg_slot_candidate_max_words: 5
   gcg_early_stop_on_attack_success: true
+  gcg_eval_naturalness_on_attack_success: true
+  gcg_eval_naturalness_llm_thinking: false

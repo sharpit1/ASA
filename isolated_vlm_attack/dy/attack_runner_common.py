@@ -5,7 +5,7 @@ import os
 import random
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -31,50 +31,6 @@ OPENAI_CLIP_IMAGENET_MODEL_ALIASES = frozenset(
         "clip-vit-b-16",
     }
 )
-
-
-def _extract_clip_feature_tensor(
-    output: object,
-    *,
-    feature_kind: str,
-) -> torch.Tensor:
-    """Normalize Transformers CLIP-family feature API outputs across versions."""
-
-    if isinstance(output, torch.Tensor):
-        features = output
-    else:
-        preferred_fields = (
-            ("text_embeds", "pooler_output")
-            if feature_kind == "text"
-            else ("image_embeds", "pooler_output")
-        )
-        features = None
-        for field_name in preferred_fields:
-            candidate = getattr(output, field_name, None)
-            if isinstance(candidate, torch.Tensor):
-                features = candidate
-                break
-        if features is None and isinstance(output, (tuple, list)):
-            features = next(
-                (
-                    candidate
-                    for candidate in output
-                    if isinstance(candidate, torch.Tensor) and candidate.ndim == 2
-                ),
-                None,
-            )
-        if features is None:
-            raise TypeError(
-                "CLIP-family get_"
-                f"{feature_kind}_features returned unsupported output type "
-                f"{type(output).__name__}"
-            )
-    if features.ndim != 2:
-        raise ValueError(
-            f"CLIP-family {feature_kind} features must be rank 2, "
-            f"got shape={tuple(features.shape)}"
-        )
-    return features
 
 
 def _is_siglip2_imagenet_model(model_name: str) -> bool:
@@ -158,10 +114,7 @@ class _PromptEnsembleImageNetClassifier(torch.nn.Module):
                     for key, value in tokens.items()
                     if isinstance(value, torch.Tensor)
                 }
-                features = _extract_clip_feature_tensor(
-                    self.model.get_text_features(**tokens),
-                    feature_kind="text",
-                )
+                features = self.model.get_text_features(**tokens)
                 features = F.normalize(features, dim=-1)
                 if class_feature_sums is None:
                     class_feature_sums = torch.zeros(
@@ -225,6 +178,7 @@ class _PromptEnsembleImageNetClassifier(torch.nn.Module):
         processed = self.processor.image_processor(
             images=images_hwc,
             do_rescale=False,
+            do_resize=False,
             return_tensors="pt",
         )
         return {
@@ -251,10 +205,7 @@ class _PromptEnsembleImageNetClassifier(torch.nn.Module):
                 vision_inputs = self._prepare_images(
                     np.clip(images[start : start + chunk_size], 0.0, 1.0)
                 )
-                image_features = _extract_clip_feature_tensor(
-                    self.model.get_image_features(**vision_inputs),
-                    feature_kind="image",
-                )
+                image_features = self.model.get_image_features(**vision_inputs)
                 image_features = F.normalize(image_features, dim=-1)
                 text_features = self.text_features.to(dtype=image_features.dtype)
                 cosine_logits = image_features @ text_features.transpose(0, 1)
@@ -407,50 +358,6 @@ class VictimModelAdapter:
         )
         x = torch.clamp(x, 0.0, 1.0)
         return x.detach().cpu().numpy().astype(np.float32)
-
-    def predict_image_paths(
-        self,
-        image_paths: Sequence[Path],
-        *,
-        batch_size: int = 1,
-    ) -> List[int]:
-        """Predict clean image files without consuming the attack query budget."""
-
-        paths = [Path(path) for path in image_paths]
-        predictions: List[int] = []
-        effective_batch_size = max(1, int(batch_size))
-        for start in range(0, len(paths), effective_batch_size):
-            batch_paths = paths[start : start + effective_batch_size]
-            preprocessed: List[np.ndarray] = []
-            for path in batch_paths:
-                with Image.open(path) as image:
-                    array = np.asarray(image.convert("RGB"), dtype=np.float32).copy() / 255.0
-                tensor = torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0).contiguous()
-                preprocessed.append(self._preprocess(tensor))
-            if not preprocessed:
-                continue
-            image_batch = np.concatenate(preprocessed, axis=0)
-            logits_or_scores = np.asarray(
-                self.f_model.predict(
-                    image_batch,
-                    batch_size=max(1, int(image_batch.shape[0])),
-                ),
-                dtype=np.float32,
-            )
-            if (
-                logits_or_scores.ndim != 2
-                or logits_or_scores.shape[0] != len(batch_paths)
-                or int(logits_or_scores.shape[-1]) <= 1
-            ):
-                raise ValueError(
-                    "invalid clean-image classifier output shape: "
-                    f"{logits_or_scores.shape}"
-                )
-            predictions.extend(
-                self._normalize_prediction_index(int(raw_idx))
-                for raw_idx in np.argmax(logits_or_scores, axis=1)
-            )
-        return predictions
 
     def objective_and_stats(self, image_01: torch.Tensor, target_label: Optional[int] = None):
         if self.label is None:
@@ -725,75 +632,6 @@ def iter_nips_metadata_batches(
         )
 
 
-def select_clean_correct_indices(
-    *,
-    victim: VictimModelAdapter,
-    images_dir: Path,
-    image_ids: Sequence[str],
-    true_labels: Sequence[int],
-    candidate_indices: Sequence[int],
-    batch_size: int,
-) -> Tuple[Set[int], List[Dict[str, object]]]:
-    """Select candidates whose clean image is correctly classified by the victim."""
-
-    if len(image_ids) != len(true_labels):
-        raise ValueError(
-            "clean filter metadata length mismatch: "
-            f"image_ids={len(image_ids)} true_labels={len(true_labels)}"
-        )
-
-    available: List[Tuple[int, Path]] = []
-    records: List[Dict[str, object]] = []
-    for raw_idx in candidate_indices:
-        idx = int(raw_idx)
-        if not 0 <= idx < len(image_ids):
-            raise ValueError(f"clean filter candidate index out of range: {idx}")
-        image_id = str(image_ids[idx])
-        image_path = Path(images_dir) / f"{image_id}.png"
-        if not image_path.is_file():
-            records.append(
-                {
-                    "sample_index": idx,
-                    "image_id": image_id,
-                    "true_label": int(true_labels[idx]),
-                    "clean_correct": False,
-                    "status": "error",
-                    "error": f"missing_source_image:{image_path}",
-                }
-            )
-            continue
-        available.append((idx, image_path))
-
-    predictions = victim.predict_image_paths(
-        [path for _, path in available],
-        batch_size=batch_size,
-    )
-    if len(predictions) != len(available):
-        raise RuntimeError(
-            "clean filter prediction count mismatch: "
-            f"predictions={len(predictions)} images={len(available)}"
-        )
-
-    selected: Set[int] = set()
-    for (idx, _), pred_idx in zip(available, predictions):
-        true_label = int(true_labels[idx])
-        clean_correct = int(pred_idx) == true_label
-        if clean_correct:
-            selected.add(idx)
-        records.append(
-            {
-                "sample_index": idx,
-                "image_id": str(image_ids[idx]),
-                "true_label": true_label,
-                "clean_pred_idx": int(pred_idx),
-                "clean_correct": bool(clean_correct),
-                "status": "selected" if clean_correct else "skipped",
-            }
-        )
-    records.sort(key=lambda item: int(item["sample_index"]))
-    return selected, records
-
-
 def resolve_optional_hf_token(explicit: str) -> str:
     token = str(explicit or "").strip()
     if token:
@@ -846,16 +684,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_samples", type=int, default=1000)
     parser.add_argument("--sample_indices", default="")
     parser.add_argument("--sample_indices_file", default="")
-    parser.add_argument(
-        "--attack_only_clean_correct",
-        type=parse_bool_flag,
-        default=False,
-        help=(
-            "Attack only samples whose clean image is correctly classified by "
-            "the selected victim model. Clean-filter queries are excluded from "
-            "max_victim_queries."
-        ),
-    )
     parser.add_argument("--image_size", type=int, default=SAVED_IMAGE_SIZE)
     parser.add_argument("--batchsize", type=int, default=1)
     parser.add_argument("--victim_model", default="resnet50")
