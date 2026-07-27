@@ -315,6 +315,73 @@ def _normalize_feedback_note(raw: object) -> str:
     text = re.sub('\\s+', ' ', text).strip()
     return text.strip(' ,.;:!?')
 
+def _coerce_optional_bool(raw: object) -> Optional[bool]:
+    if isinstance(raw, bool):
+        return bool(raw)
+    text = str(raw or '').strip().lower()
+    if text in {'1', 'true', 'yes', 'y', 'natural', 'plausible', 'realistic'}:
+        return True
+    if text in {'0', 'false', 'no', 'n', 'unnatural', 'implausible', 'not natural'}:
+        return False
+    return None
+
+def _feedback_suggests_unnatural(raw: object) -> bool:
+    text = _normalize_feedback_note(raw).lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            'unnatural',
+            'not natural',
+            'implausible',
+            'not plausible',
+            'unrealistic',
+            'not realistic',
+            'artificial',
+            'fake',
+            'deformed',
+            'distorted',
+            'warped',
+            'artifact',
+            'artifacts',
+            'glitch',
+        )
+    )
+
+def parse_naturalness_eval_answer(raw_answer: str) -> Tuple[Optional[bool], str]:
+    payload = extract_json_payload(raw_answer)
+    natural: Optional[bool] = None
+    feedback = ''
+
+    if isinstance(payload, dict):
+        for key in ('natural', 'is_natural', 'looks_natural', 'naturalness', 'verdict', 'answer'):
+            if key in payload:
+                natural = _coerce_optional_bool(payload.get(key))
+                if natural is not None:
+                    break
+        for key in ('feedback', 'reason', 'explanation', 'note', 'why'):
+            if key in payload:
+                feedback = _normalize_feedback_note(payload.get(key))
+                if feedback:
+                    break
+
+    text = _normalize_feedback_note(raw_answer)
+    text_lower = text.lower()
+    if natural is None:
+        if _feedback_suggests_unnatural(feedback) or _feedback_suggests_unnatural(text):
+            natural = False
+        elif any(token in text_lower for token in ('looks natural', 'is natural', 'plausible', 'realistic')):
+            natural = True
+        elif text_lower.startswith(('yes', 'true')):
+            natural = True
+        elif text_lower.startswith(('no', 'false')):
+            natural = False
+
+    if natural is False and not feedback:
+        feedback = text or 'The rendered image looks unnatural.'
+    return natural, feedback
+
 def parse_scene_vocab_words(raw_answer: str, limit: int) -> List[str]:
     payload = extract_json_payload(raw_answer)
     raw_items: Optional[Sequence[object]] = None
@@ -507,6 +574,21 @@ def build_marked_prompt(current_prompt: str, current_word: str, occurrence: int,
             return text.replace(slot_marker, marker, 1)
     return text
 
+def mask_target_class_in_prompt_context(prompt: str, class_name: str) -> str:
+    """Defensively hide explicit class text from the candidate-generation LLM."""
+    masked = str(prompt or '')
+    for marker in ('<class>', '{class}', '{class_name}', '{target_class_name}'):
+        masked = masked.replace(marker, 'the subject')
+    target_class_name = str(class_name or '').strip()
+    if target_class_name:
+        masked = re.sub(
+            re.escape(target_class_name),
+            'the subject',
+            masked,
+            flags=re.IGNORECASE,
+        )
+    return re.sub(r'\s+', ' ', masked).strip()
+
 def generate_scene_vocab_words(*, args: argparse.Namespace, step_idx: int, current_prompt: str, current_word: str, slot_kind: str, best_objective: float, previous_feedback: Sequence[Dict[str, object]], reference_image_path: Path, fallback_word: str, runtime_cache: Optional[PersistentVLMRuntimeCache]=None) -> Tuple[List[str], str, str, Optional[str]]:
     _maybe_disable_cudnn_sdpa_for_vim_small(getattr(args, 'classifier_name', None), context='generate_scene_vocab_words')
     setattr(args, '_scene_vocab_strategy_groups', [])
@@ -520,7 +602,13 @@ def generate_scene_vocab_words(*, args: argparse.Namespace, step_idx: int, curre
     using_default_strategy_set = [str(item['name']) for item in strategy_specs] == [str(item['name']) for item in all_strategy_specs]
     slot_spec = slot_prompt_spec(slot_kind, max_words=slot_candidate_max_words)
     slot_marker = slot_spec['marker']
-    marked_prompt = build_marked_prompt(current_prompt, current_word, int(args.gcg_occurrence), slot_marker)
+    class_ablation_enabled = bool(getattr(args, 'class_ablation', False))
+    prompt_context = (
+        mask_target_class_in_prompt_context(current_prompt, getattr(args, 'class_name', ''))
+        if class_ablation_enabled
+        else current_prompt
+    )
+    marked_prompt = build_marked_prompt(prompt_context, current_word, int(args.gcg_occurrence), slot_marker)
     current_value = normalize_scene_vocab_word(str(current_word))
     if not current_value:
         current_value = normalize_scene_vocab_word(str(fallback_word))
@@ -528,7 +616,10 @@ def generate_scene_vocab_words(*, args: argparse.Namespace, step_idx: int, curre
     if not slot_topic:
         slot_topic = fallback_word
     target_class_name = str(args.class_name or '').strip() or None
-    class_requirement = f'- Every candidate must be semantically related to the target class "<class>" (for this example: "{target_class_name}").\n' if target_class_name else '- Every candidate must be semantically related to the target class "<class>".\n'
+    if class_ablation_enabled:
+        class_requirement = ''
+    else:
+        class_requirement = f'- Every candidate must be semantically related to the target class "<class>" (for this example: "{target_class_name}").\n' if target_class_name else '- Every candidate must be semantically related to the target class "<class>".\n'
     has_naturalness_feedback = any((item.get('naturalness_is_natural') is False or bool(_normalize_feedback_note(item.get('naturalness_feedback'))) for item in previous_feedback))
     feedback_block = format_scene_vocab_feedback(feedback_entries=previous_feedback, enabled=bool(args.gcg_scene_vocab_feedback), limit=int(args.gcg_scene_feedback_limit))
     visual_feedback_block = 'Adversarial visual feedback:\n- The reference image is attached and represents the most recent generated result.\n'
@@ -655,6 +746,80 @@ def query_vlm_word(*, image_path: Path, args: argparse.Namespace, slot_kind: str
     candidate_word = normalize_slot_value(raw_answer, fallback_word, slot_kind)
     return (candidate_word, raw_answer, None)
 
+def evaluate_attack_success_naturalness(
+    *,
+    image_path: Path,
+    candidate_prompt: str,
+    args: argparse.Namespace,
+    is_source_vs_edited_comparison: bool = False,
+    runtime_cache: Optional[PersistentVLMRuntimeCache] = None,
+) -> Tuple[Optional[bool], str, str, Optional[str]]:
+    class_name = str(getattr(args, 'class_name', '') or '').strip()
+    if class_name:
+        target_class_name = class_name
+        base_description = f'a photo of {class_name}'
+    else:
+        target_class_name = 'the original main subject'
+        base_description = 'a photo of the original main subject'
+    del candidate_prompt
+
+    if bool(is_source_vs_edited_comparison):
+        eval_prompt = (
+            'You are judging whether an edited image is a natural and plausible result of a requested change.\n'
+            'The attached image is a side-by-side comparison.\n'
+            '- Left: source image\n'
+            '- Right: edited image\n'
+            f'Base description of the source image: "{base_description}"\n'
+            f'The main_object is the target_class_name: "{target_class_name}".\n'
+            'Your primary goal is to verify if the MAIN OBJECT from the source image is preserved and if the overall edit makes semantic sense.\n'
+            'CRITICAL EVALUATION CRITERIA:\n'
+            '1. Focus heavily on SEMANTIC PLAUSIBILITY and the structural integrity of the main subject.\n'
+            '2. BE LENIENT with minor editing artifacts, slight lighting mismatches, or background changes. Do NOT reject the image for small imperfections as long as the main object is clearly recognizable and consistent with the base description.\n'
+            'If the main object is maintained and the edit is logically possible in the real world (or the given context), set natural=true.\n'
+            'If the edited result is completely structurally broken, the main object is destroyed, or it contains severe, immersion-breaking distortions, set natural=false and write one short feedback sentence about the main visual problem.\n'
+            'Return ONLY valid JSON with the schema {"natural": true, "feedback": ""}.'
+        )
+    else:
+        eval_prompt = (
+            'You are judging whether an edited image is natural and human-plausible.\n'
+            f'Base description of the image: "{base_description}"\n'
+            f'The main_object is the target_class_name: "{target_class_name}".\n'
+            'Judge only visual naturalness and plausibility of the attached edited image.\n'
+            'If the edited result looks natural and plausible, set natural=true.\n'
+            'If the edited result looks visually unnatural or implausible, set natural=false and write one short '
+            'feedback sentence about the main visual problem.\n'
+            'Return ONLY valid JSON with the schema {"natural": true, "feedback": ""}.'
+        )
+
+    raw_answer, error = query_vlm_text(
+        image_path=Path(image_path),
+        question=eval_prompt,
+        vlm_backend=str(getattr(args, 'gcg_scene_llm_backend', 'gemma4')),
+        vlm_model_id=str(getattr(args, 'gcg_scene_llm_model_id', 'google/gemma-4-E4B-it')),
+        vlm_device_raw=str(getattr(args, 'gcg_scene_llm_device', 'auto')),
+        max_new_tokens=min(
+            512,
+            max(64, int(getattr(args, 'gcg_scene_llm_max_new_tokens', 512))),
+        ),
+        enable_thinking=bool(
+            getattr(
+                args,
+                'gcg_eval_naturalness_llm_thinking',
+                getattr(args, 'gcg_scene_llm_thinking', False),
+            )
+        ),
+        do_sample=False,
+        classifier_name=str(getattr(args, 'classifier_name', '')),
+        runtime_cache=runtime_cache,
+    )
+    if error is not None:
+        return None, '', str(raw_answer or ''), error
+
+    natural, feedback = parse_naturalness_eval_answer(str(raw_answer or ''))
+    if natural is None:
+        return None, feedback, str(raw_answer or ''), 'naturalness_verdict_unparseable'
+    return natural, feedback, str(raw_answer or ''), None
+
 def image_tensor_01_to_pil(image_01: torch.Tensor) -> Image.Image:
     tensor = image_01
     if tensor.ndim == 4:
@@ -693,6 +858,56 @@ def classifier_input_image(image: Image.Image, classifier) -> Image.Image:
         tensor = F.interpolate(tensor, size=(input_size, input_size), mode='bilinear', align_corners=False, antialias=True)
     return image_tensor_01_to_pil(tensor).convert('RGB')
 
+
+def classifier_evaluation_artifacts(classifier) -> Dict[str, object]:
+    """Copy the exact image artifacts produced by the latest victim-model query."""
+
+    getter = getattr(classifier, 'get_last_evaluation_payload', None)
+    if not callable(getter):
+        return {}
+    payload = getter()
+    if payload is None:
+        raise RuntimeError('victim classifier did not retain its latest evaluation payload')
+
+    raw_float32 = payload.get('candidate_classifier_input_float32')
+    classifier_image = payload.get('candidate_classifier_image')
+    if raw_float32 is None or not isinstance(classifier_image, Image.Image):
+        raise RuntimeError('victim evaluation payload is missing exact classifier artifacts')
+    if isinstance(raw_float32, torch.Tensor):
+        raw_float32 = raw_float32.detach().cpu().numpy()
+    classifier_input_float32 = np.asarray(raw_float32)
+    if classifier_input_float32.dtype != np.float32:
+        raise RuntimeError(
+            f'victim classifier input must be float32, got {classifier_input_float32.dtype}'
+        )
+    if classifier_input_float32.ndim != 3 or int(classifier_input_float32.shape[0]) != 3:
+        raise RuntimeError(
+            'victim classifier input must be unbatched CHW, '
+            f'got {tuple(int(dim) for dim in classifier_input_float32.shape)}'
+        )
+
+    artifacts: Dict[str, object] = {
+        'candidate_classifier_input_float32': np.array(
+            classifier_input_float32,
+            dtype=np.float32,
+            order='C',
+            copy=True,
+        ),
+        'candidate_classifier_image': classifier_image.copy(),
+        'candidate_classifier_image_size': int(
+            payload.get('candidate_classifier_image_size', classifier_image.size[0])
+        ),
+        'candidate_image_source': str(
+            payload.get('candidate_image_source', 'victim_classifier_input')
+        ),
+    }
+    if payload.get('victim_query_attempt_count') is not None:
+        artifacts['victim_query_attempt_count'] = int(
+            payload['victim_query_attempt_count']
+        )
+    return artifacts
+
+
 def evaluate_attack_candidates(*, args: argparse.Namespace, classifier: TorchvisionClassifier, candidate_words: Sequence[str], candidate_prompts: Sequence[str], has_input_image: bool, render_session: Optional[PersistentFluxRenderSession]=None, mixed_initial_edit_cache: Optional[Dict[str, object]]=None, capture_classifier_tile_image: bool=True, **_unused_legacy_options) -> Tuple[List[Dict[str, object]], Optional[str], None]:
     """Render and score edit candidates only; no inversion or source-image tile is rendered."""
     del _unused_legacy_options
@@ -719,11 +934,13 @@ def evaluate_attack_candidates(*, args: argparse.Namespace, classifier: Torchvis
             setattr(render_session, 'last_prompt_query_count', int(prompt_query_count))
             with torch.no_grad():
                 objective, stats = classifier.objective_and_stats(image_01, target_label=None)
+            exact_artifacts = classifier_evaluation_artifacts(classifier)
         except Exception as exc:
             return (results, f'candidate_{int(index)}:{type(exc).__name__}:{exc}', None)
         result: Dict[str, object] = {'candidate_word': words[index], 'candidate_prompt': prompts[index], 'candidate_objective': float(objective), 'pred_idx': stats.get('pred_idx'), 'pred_conf': stats.get('pred_conf'), 'pred_logit': stats.get('pred_logit'), 'target_conf': stats.get('target_conf'), 'target_logit': stats.get('target_logit'), 'target_label_conf': stats.get('target_label_conf'), 'target_label_logit': stats.get('target_label_logit'), 'ce': stats.get('ce'), 'candidate_variant': 'prompt', 'candidate_strip_index': int(index), 'candidate_selected_image': tile.copy(), 'candidate_selected_image_width': int(tile.width), 'candidate_selected_image_height': int(tile.height), 'candidate_selected_image_source': 'raw_tile'}
+        result.update(exact_artifacts)
         results.append(result)
-        if bool(capture_classifier_tile_image):
+        if bool(capture_classifier_tile_image) and not exact_artifacts:
             try:
                 evaluated_image = classifier_input_image(tile, classifier)
                 result['candidate_classifier_image'] = evaluated_image.copy()
@@ -747,7 +964,7 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
 def save_blackbox_prompt_artifacts(*, run_dir: Path, step_idx: int, candidate_source: str, prompt_text: str, raw_answer: str, feedback_used: Sequence[Dict[str, object]], generated_words: Sequence[str], filtered_words: Sequence[str], scored_candidates: Sequence[Dict[str, object]], vlm_error: Optional[str], score_error: Optional[str]) -> Dict[str, str]:
 
     def _json_safe_candidate(item: Dict[str, object]) -> Dict[str, object]:
-        return {key: value for key, value in dict(item).items() if key not in {'candidate_classifier_image', 'candidate_selected_image', 'candidate_precomputed_selected_image_path'}}
+        return {key: value for key, value in dict(item).items() if key not in {'candidate_classifier_image', 'candidate_classifier_input_float32', 'candidate_selected_image', 'candidate_precomputed_selected_image_path'}}
     artifact_dir = run_dir / 'prompt_artifacts'
     human_step = int(step_idx) + 1
     stem = 'scene_vocab' if str(candidate_source) == 'gemma_scene_vocab' else 'vlm_query'
@@ -765,4 +982,15 @@ def save_blackbox_prompt_artifacts(*, run_dir: Path, step_idx: int, candidate_so
         response_payload['score_error'] = str(score_error)
     write_json(response_json_path, response_payload)
     return {'prompt_text_path': relpath_from_run_dir(run_dir, prompt_text_path), 'response_json_path': relpath_from_run_dir(run_dir, response_json_path)}
-__all__ = ('PersistentVLMRuntimeCache', 'classifier_input_image', 'evaluate_attack_candidates', 'generate_scene_vocab_words', 'image_to_tensor_01', 'query_vlm_word', 'save_blackbox_prompt_artifacts')
+__all__ = (
+    'PersistentVLMRuntimeCache',
+    'classifier_input_image',
+    'classifier_evaluation_artifacts',
+    'evaluate_attack_candidates',
+    'evaluate_attack_success_naturalness',
+    'generate_scene_vocab_words',
+    'image_to_tensor_01',
+    'parse_naturalness_eval_answer',
+    'query_vlm_word',
+    'save_blackbox_prompt_artifacts',
+)

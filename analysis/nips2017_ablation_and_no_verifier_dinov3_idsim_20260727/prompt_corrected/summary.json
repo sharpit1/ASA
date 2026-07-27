@@ -1,0 +1,214 @@
+{
+  "scope": "Prompt-label correction applied to the existing clean-correct, stored-success identity-metric set.",
+  "prompt_source": "sample report.json optimized_prompt, then early_stop candidate_prompt, then attack_success_candidate candidate_prompt",
+  "prompt_label_rule": "Predicted labels named in source_prompt are treated as correct, using categories.csv aliases and eval_attack_success_float32 token boundaries.",
+  "prediction_source": "adv_pred from persisted final_selected.png; float32 sidecars are absent in these copied run directories",
+  "models": {
+    "swin": {
+      "total_samples": 1000,
+      "clean_correct_count": 956,
+      "uncorrected_selected_count": 865,
+      "source_prompt_count": 865,
+      "prompt_category_match_count": 232,
+      "excluded_by_prompt_correction_count": 13,
+      "prompt_corrected_selected_count": 852,
+      "prompt_corrected_retention_rate": 0.9849710982658959,
+      "uncorrected_success_rate_on_clean_correct": 0.9048117154811716,
+      "prompt_corrected_success_rate_on_clean_correct": 0.891213389121339,
+      "prompt_corrected_asr_delta": -0.0135983263598326,
+      "uncorrected_metrics": {
+        "dinov3_similarity": {
+          "count": 865,
+          "mean": 0.7037854584483053,
+          "std": 0.2140318604569062,
+          "median": 0.766128659248352,
+          "q25": 0.602008044719696,
+          "q75": 0.8622682690620422,
+          "min": -0.021362975239753723,
+          "max": 0.9751085638999939
+        },
+        "dinov3_distance": {
+          "count": 865,
+          "mean": 0.2962145415516947,
+          "std": 0.2140318604569062,
+          "median": 0.23387134075164795,
+          "q25": 0.13773173093795776,
+          "q75": 0.39799195528030396,
+          "min": 0.024891436100006104,
+          "max": 1.0213629752397537
+        },
+        "idsim_similarity": {
+          "count": 865,
+          "mean": 0.6692118656385496,
+          "std": 0.18321570348693778,
+          "median": 0.6923224329948425,
+          "q25": 0.5514487028121948,
+          "q75": 0.8181332945823669,
+          "min": 0.04907553270459175,
+          "max": 0.9651124477386475
+        },
+        "idsim_distance": {
+          "count": 865,
+          "mean": 0.3307881343614504,
+          "std": 0.18321570348693778,
+          "median": 0.30767756700515747,
+          "q25": 0.18186670541763306,
+          "q75": 0.4485512971878052,
+          "min": 0.03488755226135254,
+          "max": 0.9509244672954082
+        }
+      },
+      "prompt_corrected_metrics": {
+        "dinov3_similarity": {
+          "count": 852,
+          "mean": 0.7080543891312511,
+          "std": 0.21063377497148308,
+          "median": 0.7702010273933411,
+          "q25": 0.6164935529232025,
+          "q75": 0.8659026324748993,
+          "min": -0.006687244400382042,
+          "max": 0.9751085638999939
+        },
+        "dinov3_distance": {
+          "count": 852,
+          "mean": 0.29194561086874893,
+          "std": 0.21063377497148308,
+          "median": 0.22979897260665894,
+          "q25": 0.1340973675251007,
+          "q75": 0.3835064470767975,
+          "min": 0.024891436100006104,
+          "max": 1.006687244400382
+        },
+        "idsim_similarity": {
+          "count": 852,
+          "mean": 0.6714497986752452,
+          "std": 0.18149863049949413,
+          "median": 0.6962454319000244,
+          "q25": 0.5554123222827911,
+          "q75": 0.8203785121440887,
+          "min": 0.04907553270459175,
+          "max": 0.9651124477386475
+        },
+        "idsim_distance": {
+          "count": 852,
+          "mean": 0.32855020132475476,
+          "std": 0.18149863049949413,
+          "median": 0.3037545680999756,
+          "q25": 0.17962148785591125,
+          "q75": 0.44458767771720886,
+          "min": 0.03488755226135254,
+          "max": 0.9509244672954082
+        }
+      },
+      "corrected_minus_uncorrected_mean": {
+        "dinov3_similarity": 0.00426893068294576,
+        "dinov3_distance": -0.00426893068294576,
+        "idsim_similarity": 0.0022379330366956163,
+        "idsim_distance": -0.0022379330366956163
+      }
+    },
+    "vim-small": {
+      "total_samples": 1000,
+      "clean_correct_count": 935,
+      "uncorrected_selected_count": 866,
+      "source_prompt_count": 866,
+      "prompt_category_match_count": 233,
+      "excluded_by_prompt_correction_count": 10,
+      "prompt_corrected_selected_count": 856,
+      "prompt_corrected_retention_rate": 0.9884526558891455,
+      "uncorrected_success_rate_on_clean_correct": 0.9262032085561497,
+      "prompt_corrected_success_rate_on_clean_correct": 0.9155080213903743,
+      "prompt_corrected_asr_delta": -0.0106951871657754,
+      "uncorrected_metrics": {
+        "dinov3_similarity": {
+          "count": 866,
+          "mean": 0.7117978266094044,
+          "std": 0.20531430813181092,
+          "median": 0.7690744996070862,
+          "q25": 0.6164437234401703,
+          "q75": 0.864856481552124,
+          "min": -0.037625502794981,
+          "max": 0.9717552065849304
+        },
+        "dinov3_distance": {
+          "count": 866,
+          "mean": 0.2882021733905957,
+          "std": 0.20531430813181092,
+          "median": 0.23092550039291382,
+          "q25": 0.13514351844787598,
+          "q75": 0.3835562765598297,
+          "min": 0.02824479341506958,
+          "max": 1.037625502794981
+        },
+        "idsim_similarity": {
+          "count": 866,
+          "mean": 0.6779787634858565,
+          "std": 0.17875906182428924,
+          "median": 0.7112142443656921,
+          "q25": 0.5592821091413498,
+          "q75": 0.8249986618757248,
+          "min": 0.048951223492622375,
+          "max": 0.9741929769515991
+        },
+        "idsim_distance": {
+          "count": 866,
+          "mean": 0.32202123651414355,
+          "std": 0.17875906182428924,
+          "median": 0.28878575563430786,
+          "q25": 0.1750013381242752,
+          "q75": 0.4407178908586502,
+          "min": 0.02580702304840088,
+          "max": 0.9510487765073776
+        }
+      },
+      "prompt_corrected_metrics": {
+        "dinov3_similarity": {
+          "count": 856,
+          "mean": 0.7163859539225732,
+          "std": 0.20000070761003183,
+          "median": 0.7710631489753723,
+          "q25": 0.621170699596405,
+          "q75": 0.8656706362962723,
+          "min": 0.022395601496100426,
+          "max": 0.9717552065849304
+        },
+        "dinov3_distance": {
+          "count": 856,
+          "mean": 0.28361404607742674,
+          "std": 0.20000070761003183,
+          "median": 0.22893685102462769,
+          "q25": 0.13432936370372772,
+          "q75": 0.37882930040359497,
+          "min": 0.02824479341506958,
+          "max": 0.9776043985038996
+        },
+        "idsim_similarity": {
+          "count": 856,
+          "mean": 0.6812120223783444,
+          "std": 0.17589471464385653,
+          "median": 0.713498055934906,
+          "q25": 0.5627579092979431,
+          "q75": 0.8254977017641068,
+          "min": 0.0491945743560791,
+          "max": 0.9741929769515991
+        },
+        "idsim_distance": {
+          "count": 856,
+          "mean": 0.3187879776216556,
+          "std": 0.17589471464385653,
+          "median": 0.286501944065094,
+          "q25": 0.17450229823589325,
+          "q75": 0.4372420907020569,
+          "min": 0.02580702304840088,
+          "max": 0.9508054256439209
+        }
+      },
+      "corrected_minus_uncorrected_mean": {
+        "dinov3_similarity": 0.004588127313168822,
+        "dinov3_distance": -0.004588127313168933,
+        "idsim_similarity": 0.0032332588924879335,
+        "idsim_distance": -0.0032332588924879335
+      }
+    }
+  }
+}

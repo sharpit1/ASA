@@ -1,11 +1,13 @@
 import gc
 from pathlib import Path
+import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image
 import torch
 
 from attack_model_registry import validate_generator_model
+from qwen_image_edit_batch import render_qwen_image_edit_batch
 
 
 def _extract_output_images(output: object) -> List[Image.Image]:
@@ -146,6 +148,47 @@ class QwenImageEditRenderSession:
             raise RuntimeError("Qwen Image Edit returned no images.")
         return images[0].convert("RGB")
 
+    def _batch_render_supported(self, *, prompt_count: int) -> bool:
+        if int(prompt_count) <= 1:
+            return False
+        if self.pipe is None:
+            return False
+        if int(getattr(self.args, "qwen_batch_size", 1)) <= 1:
+            return False
+        if bool(getattr(self.args, "cpu_offload", False)):
+            return False
+        return True
+
+    def _pipe_call_batch(
+        self,
+        *,
+        prompts: Sequence[str],
+        image: Image.Image,
+        seeds: Sequence[int],
+    ) -> List[Image.Image]:
+        if self.pipe is None:
+            raise RuntimeError("Qwen Image Edit render session is not initialized.")
+        return render_qwen_image_edit_batch(
+            pipe=self.pipe,
+            prompts=list(prompts),
+            image=image,
+            generators=[self._generator(int(seed)) for seed in seeds],
+            true_cfg_scale=float(getattr(self.args, "qwen_true_cfg_scale", 4.0)),
+            negative_prompt=str(getattr(self.args, "qwen_negative_prompt", " ") or " "),
+            num_inference_steps=int(getattr(self.args, "num_inference_steps", 4)),
+            max_sequence_length=int(getattr(self.args, "max_sequence_length", 512)),
+            guidance_scale=float(getattr(self.args, "guidance_scale", 1.0)),
+        )
+
+    @staticmethod
+    def _clear_failed_batch_allocations() -> None:
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
     def render_images(
         self,
         *,
@@ -160,10 +203,52 @@ class QwenImageEditRenderSession:
 
         condition_image = self._load_condition_image()
         base_seed = int(getattr(self.args, "seed", 42))
-        images = [
-            self._pipe_call(prompt=prompt, image=condition_image, seed=base_seed + idx)
-            for idx, prompt in enumerate(prompt_list)
-        ]
+        images: List[Image.Image] = []
+        if self._batch_render_supported(prompt_count=len(prompt_list)):
+            batch_size = max(2, int(getattr(self.args, "qwen_batch_size", 1)))
+            try:
+                for start in range(0, len(prompt_list), batch_size):
+                    chunk = prompt_list[start : start + batch_size]
+                    chunk_seeds = [base_seed + idx for idx in range(start, start + len(chunk))]
+                    if len(chunk) == 1:
+                        images.append(
+                            self._pipe_call(
+                                prompt=chunk[0],
+                                image=condition_image,
+                                seed=chunk_seeds[0],
+                            )
+                        )
+                        continue
+                    print(
+                        f"[qwen_batch] rendering {len(chunk)} prompts in one denoising batch",
+                        file=sys.stderr,
+                    )
+                    images.extend(
+                        self._pipe_call_batch(
+                            prompts=chunk,
+                            image=condition_image,
+                            seeds=chunk_seeds,
+                        )
+                    )
+            except Exception as exc:
+                if not bool(getattr(self.args, "qwen_batch_fallback", True)):
+                    raise
+                print(
+                    "[qwen_batch] batch render failed; falling back to sequential render: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                images = []
+                self._clear_failed_batch_allocations()
+        if len(images) == 0:
+            images = [
+                self._pipe_call(prompt=prompt, image=condition_image, seed=base_seed + idx)
+                for idx, prompt in enumerate(prompt_list)
+            ]
+        if len(images) != len(prompt_list):
+            raise RuntimeError(
+                f"Qwen Image Edit returned {len(images)} images for {len(prompt_list)} prompts."
+            )
         return [image.convert("RGB").copy() for image in images]
 
     def _score_image(
@@ -172,14 +257,15 @@ class QwenImageEditRenderSession:
         image: Image.Image,
         classifier,
         cwor_target_label: Optional[int],
-    ) -> Tuple[float, Dict[str, object]]:
+    ) -> Tuple[float, Dict[str, object], Dict[str, object]]:
         import vlm_attack as vlm_attack_module
 
         image_01 = vlm_attack_module.image_to_tensor_01(image).to(device=str(getattr(self.args, "device", "cuda")))
         self.last_and_query_count += 1
         with torch.no_grad():
             objective, stats = classifier.objective_and_stats(image_01, target_label=cwor_target_label)
-        return float(objective), dict(stats)
+        exact_artifacts = vlm_attack_module.classifier_evaluation_artifacts(classifier)
+        return float(objective), dict(stats), exact_artifacts
 
     @staticmethod
     def _candidate_prompt(candidate: Dict[str, object]) -> str:
@@ -297,7 +383,7 @@ class QwenImageEditRenderSession:
             trial_seed = base_seed + 1000 + int(cwor_step_index) * 97 + int(attempt_count)
             try:
                 trial_image = self._pipe_call(prompt=trial_prompt, image=condition_image, seed=trial_seed)
-                trial_objective, trial_stats = self._score_image(
+                trial_objective, trial_stats, exact_artifacts = self._score_image(
                     image=trial_image,
                     classifier=classifier,
                     cwor_target_label=cwor_target_label,
@@ -308,7 +394,15 @@ class QwenImageEditRenderSession:
                 for result in evaluated_results:
                     result["cwor_strategy_query_count"] = int(query_count)
                 return evaluated_results, f"qwen_strategy_and:{type(exc).__name__}:{exc}"
-            evaluated_image = vlm_attack_module.classifier_input_image(trial_image, classifier)
+            if not exact_artifacts:
+                evaluated_image = vlm_attack_module.classifier_input_image(
+                    trial_image,
+                    classifier,
+                )
+                exact_artifacts = {
+                    "candidate_classifier_image": evaluated_image.copy(),
+                    "candidate_classifier_image_size": int(evaluated_image.size[0]),
+                }
             components = [
                 {
                     "strategy_name": str(item.get("candidate_strategy_name", "")),
@@ -334,8 +428,7 @@ class QwenImageEditRenderSession:
                     "ce": trial_stats.get("ce"),
                     "candidate_variant": "cwor",
                     "candidate_selected_image": trial_image.copy(),
-                    "candidate_classifier_image": evaluated_image.copy(),
-                    "candidate_classifier_image_size": int(evaluated_image.size[0]),
+                    **exact_artifacts,
                     "candidate_selected_image_source": "qwen_strategy_and",
                     "cwor_strategy_merge_mode": "and",
                     "cwor_strategy_components": components,
@@ -409,6 +502,12 @@ class Qwen2AttackRuntimeAdapter:
             setattr(args, "qwen_num_images_per_prompt", 1)
         if int(getattr(args, "qwen_num_images_per_prompt", 1)) != 1:
             raise ValueError("Qwen Image Edit attack runtime requires one image per prompt")
+        if not hasattr(args, "qwen_batch_size"):
+            setattr(args, "qwen_batch_size", 1)
+        if int(getattr(args, "qwen_batch_size", 1)) < 1:
+            raise ValueError("Qwen Image Edit qwen_batch_size must be >= 1")
+        if not hasattr(args, "qwen_batch_fallback"):
+            setattr(args, "qwen_batch_fallback", True)
         if not hasattr(args, "gcg_scene_vocab_prompts_per_strategy"):
             setattr(args, "gcg_scene_vocab_prompts_per_strategy", 0)
         if not hasattr(args, "gcg_scene_vocab_enabled_strategies"):
@@ -502,6 +601,10 @@ class Qwen2AttackRuntimeAdapter:
         kwargs["runtime_cache"] = self._runtime_cache
         return module.query_vlm_word(**kwargs)
 
+    def evaluate_naturalness(self, **kwargs):
+        module = self._get_module()
+        kwargs["runtime_cache"] = self._runtime_cache
+        return module.evaluate_attack_success_naturalness(**kwargs)
 
     def evaluate_candidates(self, **kwargs):
         module = self._get_module()

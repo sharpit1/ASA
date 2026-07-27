@@ -456,6 +456,10 @@ class BerniniAttackRuntimeAdapter:
         kwargs["runtime_cache"] = self._runtime_cache
         return module.query_vlm_word(**kwargs)
 
+    def evaluate_naturalness(self, **kwargs):
+        module = self._get_module()
+        kwargs["runtime_cache"] = self._runtime_cache
+        return module.evaluate_attack_success_naturalness(**kwargs)
 
     def evaluate_candidates(self, **kwargs):
         module = self._get_module()
@@ -573,7 +577,9 @@ class BerniniAttackRuntimeAdapter:
         except Exception:
             cwor_target_label = None
 
-        def _score_image(image: Image.Image) -> Tuple[float, Dict[str, object]]:
+        def _score_image(
+            image: Image.Image,
+        ) -> Tuple[float, Dict[str, object], Dict[str, object]]:
             nonlocal query_count
             module = self._get_module()
             image_01 = module.image_to_tensor_01(image).to(
@@ -586,7 +592,8 @@ class BerniniAttackRuntimeAdapter:
                     image_01,
                     target_label=cwor_target_label,
                 )
-            return float(objective), dict(stats)
+            exact_artifacts = module.classifier_evaluation_artifacts(classifier)
+            return float(objective), dict(stats), exact_artifacts
 
         selected_items: List[Dict[str, object]] = [ranked[0]]
         selected_prompts: List[str] = [_candidate_prompt(ranked[0])]
@@ -637,13 +644,21 @@ class BerniniAttackRuntimeAdapter:
             for plan, trial_image in zip(trial_plans, trial_images):
                 try:
                     trial_image = trial_image.convert("RGB").copy()
-                    trial_objective, trial_stats = _score_image(trial_image)
+                    trial_objective, trial_stats, exact_artifacts = _score_image(trial_image)
                 except Exception as exc:
                     failures.append(f"trial_{int(query_count)}:{type(exc).__name__}:{exc}")
                     continue
 
                 module = self._get_module()
-                evaluated_image = module.classifier_input_image(trial_image, classifier)
+                if not exact_artifacts:
+                    evaluated_image = module.classifier_input_image(
+                        trial_image,
+                        classifier,
+                    )
+                    exact_artifacts = {
+                        "candidate_classifier_image": evaluated_image.copy(),
+                        "candidate_classifier_image_size": int(evaluated_image.size[0]),
+                    }
                 components = [
                     {
                         "strategy_name": str(item.get("candidate_strategy_name", "")),
@@ -669,8 +684,7 @@ class BerniniAttackRuntimeAdapter:
                         "ce": trial_stats.get("ce"),
                         "candidate_variant": "cwor",
                         "candidate_selected_image": trial_image.copy(),
-                        "candidate_classifier_image": evaluated_image.copy(),
-                        "candidate_classifier_image_size": int(evaluated_image.size[0]),
+                        **exact_artifacts,
                         "candidate_selected_image_source": "bernini_strategy_and",
                         "cwor_strategy_merge_mode": "and",
                         "cwor_strategy_components": components,

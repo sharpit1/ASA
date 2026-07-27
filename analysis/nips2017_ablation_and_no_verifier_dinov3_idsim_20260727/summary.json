@@ -1,0 +1,217 @@
+{
+  "selection_definition": "clean_pred == true_label and stored final_attack_success == true",
+  "quantized_success_definition": "clean_pred == true_label and persisted PNG adv_pred != true_label",
+  "reference_image": "data/nips2017/images/<ImageId>.png",
+  "attack_image": "sample_<index>/images/final_selected.png",
+  "dinov3": {
+    "model": "dinov3_vitl16",
+    "checkpoint": "ckpt/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
+    "checkpoint_sha256": "8aa4cbddda325040fc78db2c272754af6ebe8ff2c55f6ec4f1964d8890f66035",
+    "feature": "normalized final CLS token",
+    "distance": "1 - cosine_similarity",
+    "image_size": 448
+  },
+  "idsim": {
+    "model": "dinov3_vitl16_cls_patch",
+    "reported_mode": "cls",
+    "distance": "official ID-Sim CLS cosine distance (1 - cosine_similarity)",
+    "image_size": 448,
+    "preprocess": "official PIL RGB -> bicubic Resize -> ToTensor; ImageNet normalization is applied inside ID-Sim"
+  },
+  "amp": false,
+  "models": {
+    "swin": {
+      "total_samples": 1000,
+      "clean_correct_count": 956,
+      "clean_accuracy": 0.956,
+      "stored_attack_success_total_count": 909,
+      "selected_for_metrics_count": 865,
+      "stored_attack_success_rate_on_clean_correct": 0.9048117154811716,
+      "quantized_attack_success_on_clean_correct_count": 868,
+      "quantized_success_retained_within_selected_count": 865,
+      "quantized_success_retention_rate_within_selected": 1.0,
+      "stored_vs_quantized_success_mismatch_count": 3,
+      "primary_selected_metrics": {
+        "dinov3_similarity": {
+          "count": 865,
+          "mean": 0.7037854584483053,
+          "std": 0.2140318604569062,
+          "median": 0.766128659248352,
+          "q25": 0.602008044719696,
+          "q75": 0.8622682690620422,
+          "min": -0.021362975239753723,
+          "max": 0.9751085638999939
+        },
+        "dinov3_distance": {
+          "count": 865,
+          "mean": 0.2962145415516947,
+          "std": 0.2140318604569062,
+          "median": 0.23387134075164795,
+          "q25": 0.13773173093795776,
+          "q75": 0.39799195528030396,
+          "min": 0.024891436100006104,
+          "max": 1.0213629752397537
+        },
+        "idsim_similarity": {
+          "count": 865,
+          "mean": 0.6692118656385496,
+          "std": 0.18321570348693778,
+          "median": 0.6923224329948425,
+          "q25": 0.5514487028121948,
+          "q75": 0.8181332945823669,
+          "min": 0.04907553270459175,
+          "max": 0.9651124477386475
+        },
+        "idsim_distance": {
+          "count": 865,
+          "mean": 0.3307881343614504,
+          "std": 0.18321570348693778,
+          "median": 0.30767756700515747,
+          "q25": 0.18186670541763306,
+          "q75": 0.4485512971878052,
+          "min": 0.03488755226135254,
+          "max": 0.9509244672954082
+        }
+      },
+      "quantized_success_retained_metrics": {
+        "dinov3_similarity": {
+          "count": 865,
+          "mean": 0.7037854584483053,
+          "std": 0.2140318604569062,
+          "median": 0.766128659248352,
+          "q25": 0.602008044719696,
+          "q75": 0.8622682690620422,
+          "min": -0.021362975239753723,
+          "max": 0.9751085638999939
+        },
+        "dinov3_distance": {
+          "count": 865,
+          "mean": 0.2962145415516947,
+          "std": 0.2140318604569062,
+          "median": 0.23387134075164795,
+          "q25": 0.13773173093795776,
+          "q75": 0.39799195528030396,
+          "min": 0.024891436100006104,
+          "max": 1.0213629752397537
+        },
+        "idsim_similarity": {
+          "count": 865,
+          "mean": 0.6692118656385496,
+          "std": 0.18321570348693778,
+          "median": 0.6923224329948425,
+          "q25": 0.5514487028121948,
+          "q75": 0.8181332945823669,
+          "min": 0.04907553270459175,
+          "max": 0.9651124477386475
+        },
+        "idsim_distance": {
+          "count": 865,
+          "mean": 0.3307881343614504,
+          "std": 0.18321570348693778,
+          "median": 0.30767756700515747,
+          "q25": 0.18186670541763306,
+          "q75": 0.4485512971878052,
+          "min": 0.03488755226135254,
+          "max": 0.9509244672954082
+        }
+      }
+    },
+    "vim-small": {
+      "total_samples": 1000,
+      "clean_correct_count": 935,
+      "clean_accuracy": 0.935,
+      "stored_attack_success_total_count": 931,
+      "selected_for_metrics_count": 866,
+      "stored_attack_success_rate_on_clean_correct": 0.9262032085561497,
+      "quantized_attack_success_on_clean_correct_count": 869,
+      "quantized_success_retained_within_selected_count": 866,
+      "quantized_success_retention_rate_within_selected": 1.0,
+      "stored_vs_quantized_success_mismatch_count": 3,
+      "primary_selected_metrics": {
+        "dinov3_similarity": {
+          "count": 866,
+          "mean": 0.7117978266094044,
+          "std": 0.20531430813181092,
+          "median": 0.7690744996070862,
+          "q25": 0.6164437234401703,
+          "q75": 0.864856481552124,
+          "min": -0.037625502794981,
+          "max": 0.9717552065849304
+        },
+        "dinov3_distance": {
+          "count": 866,
+          "mean": 0.2882021733905957,
+          "std": 0.20531430813181092,
+          "median": 0.23092550039291382,
+          "q25": 0.13514351844787598,
+          "q75": 0.3835562765598297,
+          "min": 0.02824479341506958,
+          "max": 1.037625502794981
+        },
+        "idsim_similarity": {
+          "count": 866,
+          "mean": 0.6779787634858565,
+          "std": 0.17875906182428924,
+          "median": 0.7112142443656921,
+          "q25": 0.5592821091413498,
+          "q75": 0.8249986618757248,
+          "min": 0.048951223492622375,
+          "max": 0.9741929769515991
+        },
+        "idsim_distance": {
+          "count": 866,
+          "mean": 0.32202123651414355,
+          "std": 0.17875906182428924,
+          "median": 0.28878575563430786,
+          "q25": 0.1750013381242752,
+          "q75": 0.4407178908586502,
+          "min": 0.02580702304840088,
+          "max": 0.9510487765073776
+        }
+      },
+      "quantized_success_retained_metrics": {
+        "dinov3_similarity": {
+          "count": 866,
+          "mean": 0.7117978266094044,
+          "std": 0.20531430813181092,
+          "median": 0.7690744996070862,
+          "q25": 0.6164437234401703,
+          "q75": 0.864856481552124,
+          "min": -0.037625502794981,
+          "max": 0.9717552065849304
+        },
+        "dinov3_distance": {
+          "count": 866,
+          "mean": 0.2882021733905957,
+          "std": 0.20531430813181092,
+          "median": 0.23092550039291382,
+          "q25": 0.13514351844787598,
+          "q75": 0.3835562765598297,
+          "min": 0.02824479341506958,
+          "max": 1.037625502794981
+        },
+        "idsim_similarity": {
+          "count": 866,
+          "mean": 0.6779787634858565,
+          "std": 0.17875906182428924,
+          "median": 0.7112142443656921,
+          "q25": 0.5592821091413498,
+          "q75": 0.8249986618757248,
+          "min": 0.048951223492622375,
+          "max": 0.9741929769515991
+        },
+        "idsim_distance": {
+          "count": 866,
+          "mean": 0.32202123651414355,
+          "std": 0.17875906182428924,
+          "median": 0.28878575563430786,
+          "q25": 0.1750013381242752,
+          "q75": 0.4407178908586502,
+          "min": 0.02580702304840088,
+          "max": 0.9510487765073776
+        }
+      }
+    }
+  },
+  "elapsed_seconds": 232.993
+}

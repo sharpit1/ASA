@@ -1,0 +1,166 @@
+{
+  "summaries": {
+    "SigLIP2": {
+      "attacked": 859,
+      "raw_success_count": 615,
+      "natural_false_count": 13,
+      "effective_success_count": 602,
+      "effective_failure_count": 257,
+      "budget_rows": [
+        {
+          "budget": 20,
+          "success_count": 491,
+          "attacked": 859,
+          "asr_percent": 57.15948777648428
+        },
+        {
+          "budget": 40,
+          "success_count": 565,
+          "attacked": 859,
+          "asr_percent": 65.77415599534342
+        },
+        {
+          "budget": 60,
+          "success_count": 588,
+          "attacked": 859,
+          "asr_percent": 68.45168800931316
+        },
+        {
+          "budget": 80,
+          "success_count": 594,
+          "attacked": 859,
+          "asr_percent": 69.15017462165308
+        },
+        {
+          "budget": 100,
+          "success_count": 602,
+          "attacked": 859,
+          "asr_percent": 70.081490104773
+        }
+      ],
+      "success_query_mean": 13.116279069767442,
+      "success_query_median": 8.0,
+      "all_capped_query_mean": 39.11059371362049,
+      "all_capped_query_median": 15,
+      "failure_query_mean": 100
+    },
+    "CLIP ViT-B/16": {
+      "attacked": 778,
+      "raw_success_count": 668,
+      "natural_false_count": 1,
+      "effective_success_count": 667,
+      "effective_failure_count": 111,
+      "budget_rows": [
+        {
+          "budget": 20,
+          "success_count": 570,
+          "attacked": 778,
+          "asr_percent": 73.26478149100257
+        },
+        {
+          "budget": 40,
+          "success_count": 636,
+          "attacked": 778,
+          "asr_percent": 81.74807197943444
+        },
+        {
+          "budget": 60,
+          "success_count": 655,
+          "attacked": 778,
+          "asr_percent": 84.19023136246787
+        },
+        {
+          "budget": 80,
+          "success_count": 661,
+          "attacked": 778,
+          "asr_percent": 84.96143958868895
+        },
+        {
+          "budget": 100,
+          "success_count": 667,
+          "attacked": 778,
+          "asr_percent": 85.73264781491002
+        }
+      ],
+      "success_query_mean": 11.407796101949025,
+      "success_query_median": 5,
+      "all_capped_query_mean": 24.047557840616967,
+      "all_capped_query_median": 8.0,
+      "failure_query_mean": 100
+    }
+  },
+  "other_attacks": [
+    {
+      "attack": "AdvFlow",
+      "victim": "SigLIP2",
+      "success_count": 113,
+      "attacked": 859,
+      "asr_percent": 13.15,
+      "all_capped_query_mean": 89.41,
+      "success_query_mean": 19.47
+    },
+    {
+      "attack": "AdvFlow",
+      "victim": "CLIP ViT-B/16",
+      "success_count": 175,
+      "attacked": 778,
+      "asr_percent": 22.49,
+      "all_capped_query_mean": 82.8,
+      "success_query_mean": 23.54
+    },
+    {
+      "attack": "DIFAttack",
+      "victim": "SigLIP2",
+      "success_count": 301,
+      "attacked": 859,
+      "asr_percent": 35.04,
+      "all_capped_query_mean": 78.63,
+      "success_query_mean": 39.02
+    },
+    {
+      "attack": "DIFAttack",
+      "victim": "CLIP ViT-B/16",
+      "success_count": 356,
+      "attacked": 778,
+      "asr_percent": 45.76,
+      "all_capped_query_mean": 71.56,
+      "success_query_mean": 37.84
+    },
+    {
+      "attack": "MCGAttack",
+      "victim": "SigLIP2",
+      "success_count": 377,
+      "attacked": 859,
+      "asr_percent": 43.89,
+      "all_capped_query_mean": 64.16,
+      "success_query_mean": 18.35
+    },
+    {
+      "attack": "MCGAttack",
+      "victim": "CLIP ViT-B/16",
+      "success_count": 445,
+      "attacked": 778,
+      "asr_percent": 57.2,
+      "all_capped_query_mean": 51.93,
+      "success_query_mean": 15.96
+    },
+    {
+      "attack": "CGAttack",
+      "victim": "SigLIP2",
+      "success_count": 236,
+      "attacked": 859,
+      "asr_percent": 27.47,
+      "all_capped_query_mean": 79.31,
+      "success_query_mean": 24.68
+    },
+    {
+      "attack": "CGAttack",
+      "victim": "CLIP ViT-B/16",
+      "success_count": 252,
+      "attacked": 778,
+      "asr_percent": 32.39,
+      "all_capped_query_mean": 76.24,
+      "success_query_mean": 26.65
+    }
+  ]
+}
