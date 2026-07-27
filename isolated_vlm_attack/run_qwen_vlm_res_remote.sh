@@ -55,6 +55,13 @@ find_system_python() {
   fi
 }
 
+normalize_pip_check() {
+  sed \
+    -e '/^No broken requirements found\.$/d' \
+    -e '/^[[:space:]]*$/d' \
+    | LC_ALL=C sort -u
+}
+
 if [[ -n "$PYTHON_BIN" ]]; then
   [[ -x "$PYTHON_BIN" ]] || die "PYTHON_BIN is not executable: $PYTHON_BIN"
 else
@@ -154,11 +161,31 @@ print(
 )
 PY
 
+  provider_pip_check="$("$PYTHON_BIN" -m pip check 2>&1 || true)"
+  provider_pip_conflicts="$(
+    printf '%s\n' "$provider_pip_check" | normalize_pip_check
+  )"
+  if [[ -n "$provider_pip_conflicts" ]]; then
+    echo "WARNING: provider Python has pre-existing dependency conflicts:" >&2
+    printf '  - %s\n' "$provider_pip_conflicts" >&2
+  fi
+
   echo "[setup] installing project additions without replacing the provider stack"
   "$PYTHON_BIN" -m pip install \
     --upgrade-strategy only-if-needed \
     -r "$PROJECT_ROOT/requirements-faas.txt"
-  "$PYTHON_BIN" -m pip check
+  installed_pip_check="$("$PYTHON_BIN" -m pip check 2>&1 || true)"
+  new_pip_conflicts="$(
+    comm -13 \
+      <(printf '%s\n' "$provider_pip_check" | normalize_pip_check) \
+      <(printf '%s\n' "$installed_pip_check" | normalize_pip_check)
+  )"
+  if [[ -n "$new_pip_conflicts" ]]; then
+    echo "ERROR: project installation introduced dependency conflicts:" >&2
+    printf '  - %s\n' "$new_pip_conflicts" >&2
+    exit 1
+  fi
+  echo "[check] project installation added no dependency conflicts"
 
   echo "[check] validating Qwen runtime imports"
   "$PYTHON_BIN" - <<'PY'
