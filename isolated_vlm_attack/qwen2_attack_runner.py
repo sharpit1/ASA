@@ -90,6 +90,112 @@ def add_total_elapsed_to_report(
         )
 
 
+def slice_clean_correct_indices(
+    *,
+    candidate_indices: Sequence[int],
+    clean_correct_indices: Sequence[int],
+    skip: int,
+    count: int,
+) -> List[int]:
+    """Return an exact clean-correct window in candidate-file order."""
+
+    skip_count = int(skip)
+    requested_count = int(count)
+    if skip_count < 0:
+        raise ValueError("--clean_correct_skip must be >= 0")
+    if requested_count < 0:
+        raise ValueError("--clean_correct_count must be >= 0")
+
+    clean_correct_set = {int(idx) for idx in clean_correct_indices}
+    ordered = [
+        int(idx)
+        for idx in candidate_indices
+        if int(idx) in clean_correct_set
+    ]
+    stop = None if requested_count == 0 else skip_count + requested_count
+    selected = ordered[skip_count:stop]
+    if requested_count > 0 and len(selected) != requested_count:
+        available_after_skip = max(0, len(ordered) - skip_count)
+        raise ValueError(
+            "not enough clean-correct samples for requested window: "
+            f"skip={skip_count} count={requested_count} "
+            f"available_after_skip={available_after_skip}"
+        )
+    return selected
+
+
+def _result_query_count(result: dict, key: str):
+    for payload in (result, result.get("partial_core_report")):
+        if not isinstance(payload, dict) or key not in payload:
+            continue
+        raw_value = payload.get(key)
+        if isinstance(raw_value, bool):
+            continue
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            return value
+    return None
+
+
+def summarize_attack_query_metrics(results: Sequence[dict]) -> dict:
+    """Aggregate attack success and victim-query metrics without inventing missing counts."""
+
+    normalized_results = [item for item in results if isinstance(item, dict)]
+    total_processed = len(normalized_results)
+    successful_results = [
+        item
+        for item in normalized_results
+        if item.get("final_attack_success") is True
+        or item.get("attack_success_before_failure") is True
+    ]
+    attack_success_count = len(successful_results)
+
+    successful_query_counts = [
+        value
+        for value in (
+            _result_query_count(item, "attack_success_query_count")
+            for item in successful_results
+        )
+        if value is not None
+    ]
+    all_query_counts = [
+        value
+        for value in (
+            _result_query_count(item, "victim_query_count")
+            for item in normalized_results
+        )
+        if value is not None
+    ]
+
+    success_mean = None
+    if successful_query_counts and len(successful_query_counts) == attack_success_count:
+        success_mean = float(sum(successful_query_counts)) / float(attack_success_count)
+
+    all_mean = None
+    if all_query_counts and len(all_query_counts) == total_processed:
+        all_mean = float(sum(all_query_counts)) / float(total_processed)
+
+    return {
+        "attack_success_count": int(attack_success_count),
+        "attack_success_rate_percent": (
+            100.0 * float(attack_success_count) / float(total_processed)
+            if total_processed
+            else 0.0
+        ),
+        "successful_attack_query_count_recorded": int(len(successful_query_counts)),
+        "successful_attack_query_mean": success_mean,
+        "all_sample_query_count_recorded": int(len(all_query_counts)),
+        "all_sample_query_mean": all_mean,
+    }
+
+
+def _format_query_mean(value) -> str:
+    return "n/a" if value is None else f"{float(value):.2f}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = base_build_parser()
     parser.description = "Qwen Image Edit 2511 black-box attack runner."
@@ -112,6 +218,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_bool_flag,
         default=True,
         help="Fall back to sequential Qwen rendering if experimental batching fails.",
+    )
+    parser.add_argument(
+        "--clean_correct_skip",
+        type=int,
+        default=0,
+        help="Skip this many clean-correct candidates before attacking.",
+    )
+    parser.add_argument(
+        "--clean_correct_count",
+        type=int,
+        default=0,
+        help="Attack exactly this many clean-correct candidates after the skip; 0 means all.",
     )
     return parser
 
@@ -220,6 +338,18 @@ def main() -> int:
         raise ValueError("--qwen_num_images_per_prompt is fixed at 1")
     if int(cfg.qwen_batch_size) < 1:
         raise ValueError("--qwen_batch_size must be >= 1")
+    if int(cfg.clean_correct_skip) < 0:
+        raise ValueError("--clean_correct_skip must be >= 0")
+    if int(cfg.clean_correct_count) < 0:
+        raise ValueError("--clean_correct_count must be >= 0")
+    if (
+        int(cfg.clean_correct_skip) > 0
+        or int(cfg.clean_correct_count) > 0
+    ) and not bool(cfg.attack_only_clean_correct):
+        raise ValueError(
+            "--clean_correct_skip/--clean_correct_count require "
+            "--attack_only_clean_correct true"
+        )
     dataset_root = Path(str(cfg.dataset_root)).expanduser().resolve()
     images_csv = dataset_root / "images.csv"
     images_dir = dataset_root / "images"
@@ -253,6 +383,7 @@ def main() -> int:
         end_index = total_available if max_samples <= 0 else min(total_available, start_index + max_samples)
 
     sample_indices = resolve_sample_indices(cfg.sample_indices, cfg.sample_indices_file)
+    selected_in_range: List[int] = []
     sample_index_set = set(sample_indices) if sample_indices else None
     if sample_indices:
         out_of_range = [idx for idx in sample_indices if idx >= total_available]
@@ -277,15 +408,16 @@ def main() -> int:
         device=str(cfg.device),
         objective_mode=str(cfg.classifier_objective),
     )
-    candidate_indices = [
-        idx
-        for idx in range(start_index, end_index)
-        if sample_index_set is None or idx in sample_index_set
-    ]
+    candidate_indices = (
+        list(selected_in_range)
+        if sample_indices
+        else list(range(start_index, end_index))
+    )
     attack_indices = set(candidate_indices)
     clean_filter_results: List[dict] = []
+    clean_filter_passed_count = 0
     if bool(cfg.attack_only_clean_correct):
-        attack_indices, clean_filter_results = select_clean_correct_indices(
+        clean_correct_indices, clean_filter_results = select_clean_correct_indices(
             victim=victim,
             images_dir=images_dir,
             image_ids=image_ids,
@@ -293,13 +425,31 @@ def main() -> int:
             candidate_indices=candidate_indices,
             batch_size=batchsize,
         )
+        clean_filter_passed_count = len(clean_correct_indices)
+        selected_clean_correct_indices = slice_clean_correct_indices(
+            candidate_indices=candidate_indices,
+            clean_correct_indices=clean_correct_indices,
+            skip=int(cfg.clean_correct_skip),
+            count=int(cfg.clean_correct_count),
+        )
+        attack_indices = set(selected_clean_correct_indices)
+        if not attack_indices:
+            raise ValueError(
+                "clean-correct selection produced no samples: "
+                f"passed={clean_filter_passed_count} "
+                f"skip={int(cfg.clean_correct_skip)} "
+                f"count={int(cfg.clean_correct_count)}"
+            )
         clean_filter_error_count = sum(
             item.get("status") == "error" for item in clean_filter_results
         )
         print(
             "[qwen2_runner] clean filter "
-            f"examined={len(clean_filter_results)} selected={len(attack_indices)} "
-            f"skipped={len(clean_filter_results) - len(attack_indices)} "
+            f"examined={len(clean_filter_results)} passed={clean_filter_passed_count} "
+            f"selected={len(attack_indices)} "
+            f"incorrect_or_missing={len(clean_filter_results) - clean_filter_passed_count} "
+            f"window_skip={int(cfg.clean_correct_skip)} "
+            f"window_count={int(cfg.clean_correct_count)} "
             f"errors={clean_filter_error_count}"
         )
 
@@ -472,6 +622,7 @@ def main() -> int:
     finally:
         runtime.close()
 
+    query_metrics = summarize_attack_query_metrics(results)
     summary = {
         "dataset_root": str(dataset_root),
         "dataset_name": str(cfg.dataset_name),
@@ -487,12 +638,17 @@ def main() -> int:
         "sample_indices_file": str(cfg.sample_indices_file or ""),
         "sample_indices": sample_indices,
         "attack_only_clean_correct": bool(cfg.attack_only_clean_correct),
+        "clean_correct_skip": int(cfg.clean_correct_skip),
+        "clean_correct_count": int(cfg.clean_correct_count),
         "clean_filter_examined_count": int(len(clean_filter_results)),
-        "clean_filter_passed_count": int(len(attack_indices))
+        "clean_filter_passed_count": int(clean_filter_passed_count)
+        if cfg.attack_only_clean_correct
+        else 0,
+        "clean_filter_selected_count": int(len(attack_indices))
         if cfg.attack_only_clean_correct
         else 0,
         "clean_filter_skipped_count": int(
-            len(clean_filter_results) - len(attack_indices)
+            len(clean_filter_results) - clean_filter_passed_count
         )
         if cfg.attack_only_clean_correct
         else 0,
@@ -506,6 +662,17 @@ def main() -> int:
         "attack_success_count": int(attack_success_count),
         "attack_failure_count": int(attack_failure_count),
         "attack_unknown_count": int(attack_unknown_count),
+        "attack_success_rate_percent": query_metrics["attack_success_rate_percent"],
+        "successful_attack_query_count_recorded": query_metrics[
+            "successful_attack_query_count_recorded"
+        ],
+        "successful_attack_query_mean": query_metrics[
+            "successful_attack_query_mean"
+        ],
+        "all_sample_query_count_recorded": query_metrics[
+            "all_sample_query_count_recorded"
+        ],
+        "all_sample_query_mean": query_metrics["all_sample_query_mean"],
         "run_root": str(run_root),
         "results": results,
     }
@@ -516,6 +683,21 @@ def main() -> int:
     print(f"[qwen2_runner] run_root={run_root}")
     print(f"[qwen2_runner] summary={summary_path}")
     print(f"[qwen2_runner] success={success_count} fail={fail_count}")
+    print(
+        "[qwen2_runner] attack_success="
+        f"{query_metrics['attack_success_count']}/{len(results)} "
+        f"rate={query_metrics['attack_success_rate_percent']:.2f}%"
+    )
+    print(
+        "[qwen2_runner] victim_query_mean "
+        "successful_attacks="
+        f"{_format_query_mean(query_metrics['successful_attack_query_mean'])} "
+        f"(recorded={query_metrics['successful_attack_query_count_recorded']}/"
+        f"{query_metrics['attack_success_count']}) "
+        "all_samples="
+        f"{_format_query_mean(query_metrics['all_sample_query_mean'])} "
+        f"(recorded={query_metrics['all_sample_query_count_recorded']}/{len(results)})"
+    )
     return 0 if fail_count == 0 and summary["clean_filter_error_count"] == 0 else 1
 
 
