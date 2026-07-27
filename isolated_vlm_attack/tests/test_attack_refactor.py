@@ -1391,13 +1391,34 @@ class AttackModeRefactorTests(unittest.TestCase):
             ISOLATED_ROOT / "run_qwen_vlm_res_second_clean100.sh"
         )
         launcher = launcher_path.read_text(encoding="utf-8")
+        remote_bootstrap = (
+            ISOLATED_ROOT / "run_qwen_vlm_res_remote.sh"
+        ).read_text(encoding="utf-8")
+        faas_requirements = (
+            ISOLATED_ROOT.parent / "requirements-faas.txt"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("target_200_indices.json", launcher)
-        self.assertIn("--attack_only_clean_correct true", launcher)
         self.assertIn("--clean_correct_skip 100", launcher)
         self.assertIn("--clean_correct_count 100", launcher)
-        self.assertIn("--qwen_batch_size 1", launcher)
-        self.assertIn('exec bash "$SCRIPT_DIR/run_vlm_attack.sh"', launcher)
+        self.assertIn(
+            'exec bash "$SCRIPT_DIR/run_qwen_vlm_res_remote.sh"',
+            launcher,
+        )
+        self.assertNotIn(
+            'exec bash "$SCRIPT_DIR/run_vlm_attack.sh"',
+            launcher,
+        )
+        self.assertIn("--attack_only_clean_correct true", remote_bootstrap)
+        self.assertIn("--qwen_batch_size 1", remote_bootstrap)
+        self.assertIn(
+            "from art.estimators.classification import PyTorchClassifier",
+            remote_bootstrap,
+        )
+        self.assertIn(
+            "adversarial-robustness-toolbox",
+            faas_requirements,
+        )
 
     def test_qwen_prompt_embedding_batches_are_padded_with_attention_mask(self) -> None:
         short = torch.ones((1, 2, 3), dtype=torch.float32)
