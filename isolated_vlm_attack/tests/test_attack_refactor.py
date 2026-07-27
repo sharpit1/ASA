@@ -1386,6 +1386,19 @@ class AttackModeRefactorTests(unittest.TestCase):
             launcher,
         )
 
+    def test_qwen_second_clean100_launcher_uses_target_200_window(self) -> None:
+        launcher_path = (
+            ISOLATED_ROOT / "run_qwen_vlm_res_second_clean100.sh"
+        )
+        launcher = launcher_path.read_text(encoding="utf-8")
+
+        self.assertIn("target_200_indices.json", launcher)
+        self.assertIn("--attack_only_clean_correct true", launcher)
+        self.assertIn("--clean_correct_skip 100", launcher)
+        self.assertIn("--clean_correct_count 100", launcher)
+        self.assertIn("--qwen_batch_size 1", launcher)
+        self.assertIn('exec bash "$SCRIPT_DIR/run_vlm_attack.sh"', launcher)
+
     def test_qwen_prompt_embedding_batches_are_padded_with_attention_mask(self) -> None:
         short = torch.ones((1, 2, 3), dtype=torch.float32)
         long = torch.full((1, 4, 3), 2.0, dtype=torch.float32)
