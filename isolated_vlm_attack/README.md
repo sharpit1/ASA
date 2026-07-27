@@ -64,6 +64,27 @@ The same option can be set as `attack_only_clean_correct: true` in YAML or as
 clean predictions inside that selection are skipped. Filter predictions are
 recorded in `run_summary.json` and do not consume `max_victim_queries`.
 
+For Qwen, `--clean_correct_skip` and `--clean_correct_count` select a window
+after that filter. Candidate order follows `sample_indices_file` when supplied,
+otherwise dataset order. A positive count is exact and fails before the attack
+if too few clean-correct candidates remain. For example, this attacks
+clean-correct candidates 101 through 200:
+
+```bash
+./isolated_vlm_attack/run_vlm_attack.sh \
+  --config configs/qwen_edit_vlm_res.yaml \
+  --attack_only_clean_correct true \
+  --clean_correct_skip 100 \
+  --clean_correct_count 100 \
+  --sample_indices_file /path/to/target_200_indices.json
+```
+
+The Qwen runner prints and stores the attack-success count/rate, the mean victim
+queries to successful attacks, and the mean victim queries across all selected
+samples. If a runtime error prevents a query count from being recorded, the
+affected mean is reported as `n/a` rather than treating the unknown value as
+zero.
+
 For the joint `no_explicit_class_guidance` ablation, use:
 
 ```bash

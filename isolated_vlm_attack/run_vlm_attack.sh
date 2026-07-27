@@ -216,6 +216,8 @@ mapping = {
     "sample_indices": "SAMPLE_INDICES",
     "sample_indices_file": "SAMPLE_INDICES_FILE",
     "attack_only_clean_correct": "ATTACK_ONLY_CLEAN_CORRECT",
+    "clean_correct_skip": "CLEAN_CORRECT_SKIP",
+    "clean_correct_count": "CLEAN_CORRECT_COUNT",
     "image_size": "IMAGE_SIZE",
     "saved_image_size": "SAVED_IMAGE_SIZE",
     "batchsize": "BATCHSIZE",
@@ -365,6 +367,8 @@ MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 SAMPLE_INDICES="${SAMPLE_INDICES:-}"
 SAMPLE_INDICES_FILE="${SAMPLE_INDICES_FILE:-}"
 ATTACK_ONLY_CLEAN_CORRECT="${ATTACK_ONLY_CLEAN_CORRECT:-0}"
+CLEAN_CORRECT_SKIP="${CLEAN_CORRECT_SKIP:-}"
+CLEAN_CORRECT_COUNT="${CLEAN_CORRECT_COUNT:-}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 BATCHSIZE="${BATCHSIZE:-1}"
 VICTIM_MODEL="${VICTIM_MODEL:-resnet50}"
@@ -578,7 +582,7 @@ Core environment overrides:
   CONFIG, RUNNER_VARIANT, CUDA_VISIBLE_DEVICES
   DATASET_ROOT, DATASET_NAME, OUTPUT_ROOT, RUN_NAME
   START_INDEX, END_INDEX, MAX_SAMPLES, SAMPLE_INDICES, SAMPLE_INDICES_FILE
-  ATTACK_ONLY_CLEAN_CORRECT
+  ATTACK_ONLY_CLEAN_CORRECT, CLEAN_CORRECT_SKIP, CLEAN_CORRECT_COUNT
   IMAGE_SIZE, BATCHSIZE, VICTIM_MODEL, DEVICE, CLASSIFIER_OBJECTIVE
   ATTACK_MODE, PROMPT, GCG_WORD, GCG_OCCURRENCE, GCG_STEPS
   GCG_BATCH_SIZE, MAX_VICTIM_QUERIES, MODEL_PATH, CLASS_ABLATION
@@ -687,6 +691,8 @@ append_optional WANDB_TAGS --wandb_tags
 
 case "$RUNNER_SCRIPT" in
   qwen2_attack_runner.py)
+    append_optional CLEAN_CORRECT_SKIP --clean_correct_skip
+    append_optional CLEAN_CORRECT_COUNT --clean_correct_count
     append_optional QWEN_TRUE_CFG_SCALE --qwen_true_cfg_scale
     append_optional QWEN_NEGATIVE_PROMPT --qwen_negative_prompt
     append_optional QWEN_NUM_IMAGES_PER_PROMPT --qwen_num_images_per_prompt

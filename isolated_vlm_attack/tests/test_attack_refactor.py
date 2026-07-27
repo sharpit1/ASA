@@ -19,6 +19,7 @@ import torch
 import yaml
 from PIL import Image
 
+import qwen2_attack_runner as qwen_runner
 from attack_model_registry import (
     FLUX2_KLEIN_MODEL_IDS,
     QWEN_IMAGE_EDIT_MODEL_IDS,
@@ -993,6 +994,90 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertFalse(default_args.attack_only_clean_correct)
         self.assertTrue(enabled_args.attack_only_clean_correct)
 
+    def test_qwen_clean_correct_window_options_default_and_parse(self) -> None:
+        default_args = build_qwen_runner_parser().parse_args([])
+        selected_args = build_qwen_runner_parser().parse_args(
+            [
+                "--attack_only_clean_correct",
+                "true",
+                "--clean_correct_skip",
+                "100",
+                "--clean_correct_count",
+                "100",
+            ]
+        )
+
+        self.assertEqual(default_args.clean_correct_skip, 0)
+        self.assertEqual(default_args.clean_correct_count, 0)
+        self.assertEqual(selected_args.clean_correct_skip, 100)
+        self.assertEqual(selected_args.clean_correct_count, 100)
+
+    def test_qwen_clean_correct_window_preserves_candidate_file_order(self) -> None:
+        selected = qwen_runner.slice_clean_correct_indices(
+            candidate_indices=[8, 3, 5, 1, 9, 2],
+            clean_correct_indices={8, 5, 1, 9, 2},
+            skip=2,
+            count=2,
+        )
+
+        self.assertEqual(selected, [1, 9])
+
+    def test_qwen_clean_correct_window_requires_the_exact_requested_count(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "available_after_skip=1",
+        ):
+            qwen_runner.slice_clean_correct_indices(
+                candidate_indices=[8, 3, 5],
+                clean_correct_indices={8, 5},
+                skip=1,
+                count=2,
+            )
+
+    def test_qwen_query_summary_reports_success_and_all_sample_means(self) -> None:
+        metrics = qwen_runner.summarize_attack_query_metrics(
+            [
+                {
+                    "final_attack_success": True,
+                    "victim_query_count": 4,
+                    "attack_success_query_count": 3,
+                },
+                {
+                    "final_attack_success": False,
+                    "victim_query_count": 100,
+                },
+                {
+                    "attack_success_before_failure": True,
+                    "partial_core_report": {
+                        "victim_query_count": 7,
+                        "attack_success_query_count": 5,
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(metrics["attack_success_count"], 2)
+        self.assertAlmostEqual(metrics["attack_success_rate_percent"], 200.0 / 3.0)
+        self.assertEqual(metrics["successful_attack_query_count_recorded"], 2)
+        self.assertEqual(metrics["successful_attack_query_mean"], 4.0)
+        self.assertEqual(metrics["all_sample_query_count_recorded"], 3)
+        self.assertEqual(metrics["all_sample_query_mean"], 37.0)
+
+    def test_qwen_query_summary_marks_incomplete_average_unknown(self) -> None:
+        metrics = qwen_runner.summarize_attack_query_metrics(
+            [
+                {
+                    "final_attack_success": True,
+                    "victim_query_count": 2,
+                    "attack_success_query_count": 2,
+                },
+                {"status": "failed", "error": "runtime error"},
+            ]
+        )
+
+        self.assertEqual(metrics["all_sample_query_count_recorded"], 1)
+        self.assertIsNone(metrics["all_sample_query_mean"])
+
     def test_class_ablation_config_is_isolated_from_the_baseline(self) -> None:
         config_root = Path(__file__).resolve().parents[1] / "configs"
         baseline = yaml.safe_load(
@@ -1284,6 +1369,20 @@ class AttackModeRefactorTests(unittest.TestCase):
         )
         self.assertIn(
             "append_optional QWEN_BATCH_FALLBACK --qwen_batch_fallback",
+            launcher,
+        )
+
+    def test_qwen_launcher_forwards_clean_correct_window_options(self) -> None:
+        launcher = (ISOLATED_ROOT / "run_vlm_attack.sh").read_text(encoding="utf-8")
+
+        self.assertIn('"clean_correct_skip": "CLEAN_CORRECT_SKIP"', launcher)
+        self.assertIn('"clean_correct_count": "CLEAN_CORRECT_COUNT"', launcher)
+        self.assertIn(
+            "append_optional CLEAN_CORRECT_SKIP --clean_correct_skip",
+            launcher,
+        )
+        self.assertIn(
+            "append_optional CLEAN_CORRECT_COUNT --clean_correct_count",
             launcher,
         )
 
