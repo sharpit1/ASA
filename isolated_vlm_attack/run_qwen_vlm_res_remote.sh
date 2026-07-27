@@ -192,13 +192,14 @@ PY
 import diffusers
 import timm
 import yaml
+from art.estimators.classification import PyTorchClassifier
 from diffusers import QwenImageEditPlusPipeline
 
 if diffusers.__version__ != "0.37.1":
     raise SystemExit(
         f"requirements-faas.txt expects diffusers 0.37.1, found {diffusers.__version__}"
     )
-print("[check] QwenImageEditPlusPipeline import OK")
+print("[check] QwenImageEditPlusPipeline and ART PyTorchClassifier imports OK")
 PY
 
   qwen_cache="$HF_HUB_CACHE/models--Qwen--Qwen-Image-Edit-2511"
