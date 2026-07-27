@@ -109,6 +109,14 @@ class QwenImageEditRenderSession:
         except Exception:
             return torch.Generator().manual_seed(int(seed))
 
+    def _distilled_guidance_scale(self) -> Optional[float]:
+        pipe = self.pipe
+        transformer = getattr(pipe, "transformer", None)
+        config = getattr(transformer, "config", None)
+        if not bool(getattr(config, "guidance_embeds", False)):
+            return None
+        return float(getattr(self.args, "guidance_scale", 1.0))
+
     def _pipe_call(self, *, prompt: str, image: Image.Image, seed: int) -> Image.Image:
         if self.pipe is None:
             raise RuntimeError("Qwen Image Edit render session is not initialized.")
@@ -121,9 +129,11 @@ class QwenImageEditRenderSession:
             "negative_prompt": str(getattr(self.args, "qwen_negative_prompt", " ") or " "),
             "num_inference_steps": int(getattr(self.args, "num_inference_steps", 4)),
             "max_sequence_length": int(getattr(self.args, "max_sequence_length", 512)),
-            "guidance_scale": float(getattr(self.args, "guidance_scale", 1.0)),
             "num_images_per_prompt": int(getattr(self.args, "qwen_num_images_per_prompt", 1)),
         }
+        guidance_scale = self._distilled_guidance_scale()
+        if guidance_scale is not None:
+            kwargs["guidance_scale"] = guidance_scale
 
         optional_keys = ["true_cfg_scale", "negative_prompt", "num_images_per_prompt"]
         with torch.inference_mode():
@@ -177,7 +187,7 @@ class QwenImageEditRenderSession:
             negative_prompt=str(getattr(self.args, "qwen_negative_prompt", " ") or " "),
             num_inference_steps=int(getattr(self.args, "num_inference_steps", 4)),
             max_sequence_length=int(getattr(self.args, "max_sequence_length", 512)),
-            guidance_scale=float(getattr(self.args, "guidance_scale", 1.0)),
+            guidance_scale=self._distilled_guidance_scale(),
         )
 
     @staticmethod
