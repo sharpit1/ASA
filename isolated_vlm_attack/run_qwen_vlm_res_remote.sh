@@ -11,7 +11,7 @@ PYTHON_BIN="${PYTHON_BIN:-}"
 HF_CACHE_ROOT="${HF_CACHE_ROOT:-$PROJECT_ROOT/.cache/huggingface}"
 TORCH_HOME="${TORCH_HOME:-$PROJECT_ROOT/.cache/torch}"
 CONFIG_PATH="${CONFIG_PATH:-configs/qwen_edit_vlm_res.yaml}"
-SAMPLE_INDICES_FILE="${SAMPLE_INDICES_FILE:-outputs/nips2017/resnet50/qwen_vlm_none_naturalness_clean500_20260727_015000/target_200_indices.json}"
+SAMPLE_INDICES_FILE="${SAMPLE_INDICES_FILE-outputs/nips2017/resnet50/qwen_vlm_none_naturalness_clean500_20260727_015000/target_200_indices.json}"
 MIN_FREE_GIB="${MIN_FREE_GIB:-90}"
 SKIP_PREPARE="${SKIP_PREPARE:-0}"
 PREPARE_ONLY="${PREPARE_ONLY:-0}"
@@ -75,10 +75,12 @@ fi
   || die "missing requirements file: requirements-faas.txt"
 [[ -f "$SCRIPT_DIR/$CONFIG_PATH" ]] \
   || die "missing isolated config: isolated_vlm_attack/$CONFIG_PATH"
-[[ "$SAMPLE_INDICES_FILE" != /* ]] \
-  || die "SAMPLE_INDICES_FILE must be relative to the ASA project root"
-[[ -f "$PROJECT_ROOT/$SAMPLE_INDICES_FILE" ]] \
-  || die "missing sample indices file: $SAMPLE_INDICES_FILE"
+if [[ -n "$SAMPLE_INDICES_FILE" ]]; then
+  [[ "$SAMPLE_INDICES_FILE" != /* ]] \
+    || die "SAMPLE_INDICES_FILE must be relative to the ASA project root"
+  [[ -f "$PROJECT_ROOT/$SAMPLE_INDICES_FILE" ]] \
+    || die "missing sample indices file: $SAMPLE_INDICES_FILE"
+fi
 [[ "$MIN_FREE_GIB" =~ ^[0-9]+$ ]] \
   || die "MIN_FREE_GIB must be a non-negative integer"
 
@@ -273,9 +275,11 @@ CMD=(
   --gcg_eval_naturalness_llm_thinking false
   --max_samples 1000
   --qwen_batch_size 1
-  --sample_indices_file "$SAMPLE_INDICES_FILE"
-  "$@"
 )
+if [[ -n "$SAMPLE_INDICES_FILE" ]]; then
+  CMD+=(--sample_indices_file "$SAMPLE_INDICES_FILE")
+fi
+CMD+=("$@")
 
 echo "[run] project root: $PROJECT_ROOT"
 echo "[run] log: $LOG_FILE"

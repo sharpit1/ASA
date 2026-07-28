@@ -1420,6 +1420,34 @@ class AttackModeRefactorTests(unittest.TestCase):
             faas_requirements,
         )
 
+    def test_qwen_after_clean200_launcher_uses_all_dataset_candidates(self) -> None:
+        launcher = (
+            ISOLATED_ROOT / "run_qwen_vlm_res_after_clean200.sh"
+        ).read_text(encoding="utf-8")
+        remote_bootstrap = (
+            ISOLATED_ROOT / "run_qwen_vlm_res_remote.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('export SAMPLE_INDICES_FILE=""', launcher)
+        self.assertIn('CLEAN_CORRECT_COUNT="${CLEAN_CORRECT_COUNT:-0}"', launcher)
+        self.assertIn("--clean_correct_skip 200", launcher)
+        self.assertIn(
+            '--clean_correct_count "$CLEAN_CORRECT_COUNT"',
+            launcher,
+        )
+        self.assertIn(
+            'exec bash "$SCRIPT_DIR/run_qwen_vlm_res_remote.sh"',
+            launcher,
+        )
+        self.assertIn(
+            'SAMPLE_INDICES_FILE="${SAMPLE_INDICES_FILE-',
+            remote_bootstrap,
+        )
+        self.assertIn(
+            'CMD+=(--sample_indices_file "$SAMPLE_INDICES_FILE")',
+            remote_bootstrap,
+        )
+
     def test_qwen_prompt_embedding_batches_are_padded_with_attention_mask(self) -> None:
         short = torch.ones((1, 2, 3), dtype=torch.float32)
         long = torch.full((1, 4, 3), 2.0, dtype=torch.float32)
