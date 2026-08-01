@@ -30,9 +30,83 @@ from attack_runner_common import (
     resolve_optional_hf_token,
     resolve_run_root,
     resolve_sample_indices,
+    sample_clean_correct_indices,
     select_clean_correct_indices,
     validate_passthrough_core_args,
 )
+
+
+def _result_query_count(result: dict, key: str):
+    for payload in (result, result.get("partial_core_report")):
+        if not isinstance(payload, dict) or key not in payload:
+            continue
+        raw_value = payload.get(key)
+        if isinstance(raw_value, bool):
+            continue
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            return value
+    return None
+
+
+def summarize_attack_query_metrics(results: Sequence[dict]) -> dict:
+    """Aggregate attack success and query metrics without inventing missing counts."""
+
+    normalized_results = [item for item in results if isinstance(item, dict)]
+    total_processed = len(normalized_results)
+    successful_results = [
+        item
+        for item in normalized_results
+        if item.get("final_attack_success") is True
+        or item.get("attack_success_before_failure") is True
+    ]
+    attack_success_count = len(successful_results)
+    successful_query_counts = [
+        value
+        for value in (
+            _result_query_count(item, "attack_success_query_count")
+            for item in successful_results
+        )
+        if value is not None
+    ]
+    all_query_counts = [
+        value
+        for value in (
+            _result_query_count(item, "victim_query_count")
+            for item in normalized_results
+        )
+        if value is not None
+    ]
+
+    successful_mean = None
+    if successful_query_counts and len(successful_query_counts) == attack_success_count:
+        successful_mean = float(sum(successful_query_counts)) / float(
+            attack_success_count
+        )
+
+    all_mean = None
+    if all_query_counts and len(all_query_counts) == total_processed:
+        all_mean = float(sum(all_query_counts)) / float(total_processed)
+
+    return {
+        "attack_success_count": int(attack_success_count),
+        "attack_success_rate_percent": (
+            100.0 * float(attack_success_count) / float(total_processed)
+            if total_processed
+            else 0.0
+        ),
+        "successful_attack_query_count_recorded": int(len(successful_query_counts)),
+        "successful_attack_query_mean": successful_mean,
+        "all_sample_query_count_recorded": int(len(all_query_counts)),
+        "all_sample_query_mean": all_mean,
+    }
+
+
+def _format_query_mean(value) -> str:
+    return "n/a" if value is None else f"{float(value):.2f}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -250,7 +324,26 @@ def main() -> int:
         if sample_index_set is None or idx in sample_index_set
     ]
     attack_indices = set(candidate_indices)
+    clean_correct_pool_indices: set[int] = set()
     clean_filter_results: List[dict] = []
+    clean_correct_sample_size = int(cfg.clean_correct_sample_size)
+    clean_correct_sample_seed = cfg.clean_correct_sample_seed
+    if clean_correct_sample_size < 0:
+        raise ValueError("--clean_correct_sample_size must be >= 0")
+    if clean_correct_sample_size > 0 and not bool(cfg.attack_only_clean_correct):
+        raise ValueError(
+            "--clean_correct_sample_size requires --attack_only_clean_correct true"
+        )
+    if clean_correct_sample_size > 0 and clean_correct_sample_seed is None:
+        raise ValueError(
+            "--clean_correct_sample_seed is required when "
+            "--clean_correct_sample_size is positive"
+        )
+    if clean_correct_sample_size == 0 and clean_correct_sample_seed is not None:
+        raise ValueError(
+            "--clean_correct_sample_seed requires a positive "
+            "--clean_correct_sample_size"
+        )
     if bool(cfg.attack_only_clean_correct):
         attack_indices, clean_filter_results = select_clean_correct_indices(
             victim=victim,
@@ -260,15 +353,32 @@ def main() -> int:
             candidate_indices=candidate_indices,
             batch_size=batchsize,
         )
+        clean_correct_pool_indices = set(attack_indices)
+        if clean_correct_sample_size > 0:
+            attack_indices = sample_clean_correct_indices(
+                clean_correct_pool_indices,
+                sample_size=clean_correct_sample_size,
+                seed=int(clean_correct_sample_seed),
+            )
         clean_filter_error_count = sum(
             item.get("status") == "error" for item in clean_filter_results
         )
         print(
             "[bernini_runner] clean filter "
-            f"examined={len(clean_filter_results)} selected={len(attack_indices)} "
-            f"skipped={len(clean_filter_results) - len(attack_indices)} "
+            f"examined={len(clean_filter_results)} "
+            f"passed={len(clean_correct_pool_indices)} "
+            f"selected={len(attack_indices)} "
+            "incorrect_or_missing="
+            f"{len(clean_filter_results) - len(clean_correct_pool_indices)} "
             f"errors={clean_filter_error_count}"
         )
+        if clean_correct_sample_size > 0:
+            print(
+                "[bernini_runner] clean-correct sample "
+                f"pool={len(clean_correct_pool_indices)} "
+                f"selected={len(attack_indices)} "
+                f"seed={int(clean_correct_sample_seed)}"
+            )
 
     results: List[dict] = []
     success_count = 0
@@ -420,6 +530,7 @@ def main() -> int:
     finally:
         runtime.close()
 
+    query_metrics = summarize_attack_query_metrics(results)
     summary = {
         "dataset_root": str(dataset_root),
         "dataset_name": str(cfg.dataset_name),
@@ -434,12 +545,25 @@ def main() -> int:
         "sample_indices_file": str(cfg.sample_indices_file or ""),
         "sample_indices": sample_indices,
         "attack_only_clean_correct": bool(cfg.attack_only_clean_correct),
+        "clean_correct_sample_size": int(clean_correct_sample_size),
+        "clean_correct_sample_seed": (
+            int(clean_correct_sample_seed)
+            if clean_correct_sample_seed is not None
+            else None
+        ),
+        "clean_correct_pool_indices": sorted(clean_correct_pool_indices),
+        "clean_correct_selected_indices": (
+            sorted(attack_indices) if cfg.attack_only_clean_correct else []
+        ),
+        "clean_correct_sampled_count": (
+            int(len(attack_indices)) if cfg.attack_only_clean_correct else 0
+        ),
         "clean_filter_examined_count": int(len(clean_filter_results)),
-        "clean_filter_passed_count": int(len(attack_indices))
+        "clean_filter_passed_count": int(len(clean_correct_pool_indices))
         if cfg.attack_only_clean_correct
         else 0,
         "clean_filter_skipped_count": int(
-            len(clean_filter_results) - len(attack_indices)
+            len(clean_filter_results) - len(clean_correct_pool_indices)
         )
         if cfg.attack_only_clean_correct
         else 0,
@@ -453,6 +577,17 @@ def main() -> int:
         "attack_success_count": int(attack_success_count),
         "attack_failure_count": int(attack_failure_count),
         "attack_unknown_count": int(attack_unknown_count),
+        "attack_success_rate_percent": query_metrics["attack_success_rate_percent"],
+        "successful_attack_query_count_recorded": query_metrics[
+            "successful_attack_query_count_recorded"
+        ],
+        "successful_attack_query_mean": query_metrics[
+            "successful_attack_query_mean"
+        ],
+        "all_sample_query_count_recorded": query_metrics[
+            "all_sample_query_count_recorded"
+        ],
+        "all_sample_query_mean": query_metrics["all_sample_query_mean"],
         "run_root": str(run_root),
         "results": results,
     }
@@ -463,6 +598,21 @@ def main() -> int:
     print(f"[bernini_runner] run_root={run_root}")
     print(f"[bernini_runner] summary={summary_path}")
     print(f"[bernini_runner] success={success_count} fail={fail_count}")
+    print(
+        "[bernini_runner] attack_success="
+        f"{query_metrics['attack_success_count']}/{len(results)} "
+        f"rate={query_metrics['attack_success_rate_percent']:.2f}%"
+    )
+    print(
+        "[bernini_runner] victim_query_mean "
+        "successful_attacks="
+        f"{_format_query_mean(query_metrics['successful_attack_query_mean'])} "
+        f"(recorded={query_metrics['successful_attack_query_count_recorded']}/"
+        f"{query_metrics['attack_success_count']}) "
+        "all_samples="
+        f"{_format_query_mean(query_metrics['all_sample_query_mean'])} "
+        f"(recorded={query_metrics['all_sample_query_count_recorded']}/{len(results)})"
+    )
     return 0 if fail_count == 0 and summary["clean_filter_error_count"] == 0 else 1
 
 
