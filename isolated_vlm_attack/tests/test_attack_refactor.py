@@ -19,6 +19,7 @@ import torch
 import yaml
 from PIL import Image
 
+import bernini_attack_runner as bernini_runner
 import qwen2_attack_runner as qwen_runner
 from attack_model_registry import (
     FLUX2_KLEIN_MODEL_IDS,
@@ -1143,6 +1144,35 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertEqual(metrics["all_sample_query_count_recorded"], 1)
         self.assertIsNone(metrics["all_sample_query_mean"])
 
+    def test_bernini_query_summary_reports_success_and_all_sample_means(self) -> None:
+        metrics = bernini_runner.summarize_attack_query_metrics(
+            [
+                {
+                    "final_attack_success": True,
+                    "victim_query_count": 4,
+                    "attack_success_query_count": 3,
+                },
+                {
+                    "final_attack_success": False,
+                    "victim_query_count": 100,
+                },
+                {
+                    "attack_success_before_failure": True,
+                    "partial_core_report": {
+                        "victim_query_count": 7,
+                        "attack_success_query_count": 5,
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(metrics["attack_success_count"], 2)
+        self.assertAlmostEqual(metrics["attack_success_rate_percent"], 200.0 / 3.0)
+        self.assertEqual(metrics["successful_attack_query_count_recorded"], 2)
+        self.assertEqual(metrics["successful_attack_query_mean"], 4.0)
+        self.assertEqual(metrics["all_sample_query_count_recorded"], 3)
+        self.assertEqual(metrics["all_sample_query_mean"], 37.0)
+
     def test_class_ablation_config_is_isolated_from_the_baseline(self) -> None:
         config_root = Path(__file__).resolve().parents[1] / "configs"
         baseline = yaml.safe_load(
@@ -1470,6 +1500,18 @@ class AttackModeRefactorTests(unittest.TestCase):
             'CMD+=(--clean_correct_sample_seed "$CLEAN_CORRECT_SAMPLE_SEED")',
             launcher,
         )
+        self.assertEqual(
+            launcher.count(
+                'CMD+=(--clean_correct_sample_size "$CLEAN_CORRECT_SAMPLE_SIZE")'
+            ),
+            2,
+        )
+        self.assertEqual(
+            launcher.count(
+                'CMD+=(--clean_correct_sample_seed "$CLEAN_CORRECT_SAMPLE_SEED")'
+            ),
+            2,
+        )
 
     def test_qwen_seeded_clean100_launcher_samples_from_all_candidates(self) -> None:
         launcher = (
@@ -1487,6 +1529,29 @@ class AttackModeRefactorTests(unittest.TestCase):
             'exec bash "$SCRIPT_DIR/run_qwen_vlm_res_remote.sh"',
             launcher,
         )
+
+    def test_bernini_seeded_clean100_launchers_fix_seed_values(self) -> None:
+        common = (
+            ISOLATED_ROOT / "run_bernini_vlm_res_seeded_clean100.sh"
+        ).read_text(encoding="utf-8")
+        seed0 = (
+            ISOLATED_ROOT / "run_bernini_vlm_res_seed0_clean100.sh"
+        ).read_text(encoding="utf-8")
+        seed1 = (
+            ISOLATED_ROOT / "run_bernini_vlm_res_seed1_clean100.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('SAMPLE_SIZE="${CLEAN_CORRECT_SAMPLE_SIZE:-100}"', common)
+        self.assertIn('SAMPLE_SEED="${CLEAN_CORRECT_SAMPLE_SEED:-${SEED:-0}}"', common)
+        self.assertIn('export SAMPLE_INDICES_FILE=""', common)
+        self.assertIn('--clean_correct_sample_size "$SAMPLE_SIZE"', common)
+        self.assertIn('--clean_correct_sample_seed "$SAMPLE_SEED"', common)
+        self.assertIn('--manual_seed "$GENERATION_SEED"', common)
+        self.assertIn('exec bash "$SCRIPT_DIR/run_vlm_attack.sh"', common)
+        self.assertIn('export CLEAN_CORRECT_SAMPLE_SEED=0', seed0)
+        self.assertIn('export MANUAL_SEED=0', seed0)
+        self.assertIn('export CLEAN_CORRECT_SAMPLE_SEED=1', seed1)
+        self.assertIn('export MANUAL_SEED=1', seed1)
 
     def test_qwen_second_clean100_launcher_uses_target_200_window(self) -> None:
         launcher_path = (

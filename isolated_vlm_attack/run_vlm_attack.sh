@@ -708,6 +708,9 @@ case "$RUNNER_SCRIPT" in
     append_optional QWEN_BATCH_FALLBACK --qwen_batch_fallback
     ;;
   bernini_attack_runner.py)
+    CMD+=(--clean_correct_sample_size "$CLEAN_CORRECT_SAMPLE_SIZE")
+    [[ -n "$CLEAN_CORRECT_SAMPLE_SEED" ]] \
+      && CMD+=(--clean_correct_sample_seed "$CLEAN_CORRECT_SAMPLE_SEED")
     append_optional BERNINI_ROOT --bernini_root
     append_optional BERNINI_CONFIG --bernini_config
     append_optional BERNINI_HIGH_NOISE_CKPT --bernini_high_noise_ckpt
