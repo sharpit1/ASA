@@ -794,6 +794,28 @@ def select_clean_correct_indices(
     return selected, records
 
 
+def sample_clean_correct_indices(
+    clean_correct_indices: Sequence[int] | Set[int],
+    *,
+    sample_size: int,
+    seed: int,
+) -> Set[int]:
+    """Select a deterministic subset of clean-correct indices without replacement."""
+
+    size = int(sample_size)
+    if size < 1:
+        raise ValueError(f"clean_correct_sample_size must be >= 1 (got {size})")
+
+    population = sorted({int(idx) for idx in clean_correct_indices})
+    if size > len(population):
+        raise ValueError(
+            "clean_correct_sample_size exceeds the clean-correct pool: "
+            f"requested={size} available={len(population)}"
+        )
+
+    return set(random.Random(int(seed)).sample(population, size))
+
+
 def resolve_optional_hf_token(explicit: str) -> str:
     token = str(explicit or "").strip()
     if token:
@@ -855,6 +877,21 @@ def build_parser() -> argparse.ArgumentParser:
             "the selected victim model. Clean-filter queries are excluded from "
             "max_victim_queries."
         ),
+    )
+    parser.add_argument(
+        "--clean_correct_sample_size",
+        type=int,
+        default=0,
+        help=(
+            "When positive, attack exactly this many samples drawn without "
+            "replacement from the clean-correct pool."
+        ),
+    )
+    parser.add_argument(
+        "--clean_correct_sample_seed",
+        type=int,
+        default=None,
+        help="Seed used to sample --clean_correct_sample_size indices.",
     )
     parser.add_argument("--image_size", type=int, default=SAVED_IMAGE_SIZE)
     parser.add_argument("--batchsize", type=int, default=1)

@@ -33,6 +33,7 @@ from attack_runner_common import (
     resolve_run_root,
     resolve_sample_indices,
     resolve_optional_hf_token,
+    sample_clean_correct_indices,
     select_clean_correct_indices,
     validate_passthrough_core_args,
 )
@@ -414,8 +415,34 @@ def main() -> int:
         else list(range(start_index, end_index))
     )
     attack_indices = set(candidate_indices)
+    clean_correct_pool_indices: set[int] = set()
     clean_filter_results: List[dict] = []
     clean_filter_passed_count = 0
+    clean_correct_sample_size = int(cfg.clean_correct_sample_size)
+    clean_correct_sample_seed = cfg.clean_correct_sample_seed
+    if clean_correct_sample_size < 0:
+        raise ValueError("--clean_correct_sample_size must be >= 0")
+    if clean_correct_sample_size > 0 and not bool(cfg.attack_only_clean_correct):
+        raise ValueError(
+            "--clean_correct_sample_size requires --attack_only_clean_correct true"
+        )
+    if clean_correct_sample_size > 0 and clean_correct_sample_seed is None:
+        raise ValueError(
+            "--clean_correct_sample_seed is required when "
+            "--clean_correct_sample_size is positive"
+        )
+    if clean_correct_sample_size == 0 and clean_correct_sample_seed is not None:
+        raise ValueError(
+            "--clean_correct_sample_seed requires a positive "
+            "--clean_correct_sample_size"
+        )
+    if clean_correct_sample_size > 0 and (
+        int(cfg.clean_correct_skip) != 0 or int(cfg.clean_correct_count) != 0
+    ):
+        raise ValueError(
+            "seeded clean-correct sampling cannot be combined with "
+            "--clean_correct_skip or --clean_correct_count"
+        )
     if bool(cfg.attack_only_clean_correct):
         clean_correct_indices, clean_filter_results = select_clean_correct_indices(
             victim=victim,
@@ -425,13 +452,21 @@ def main() -> int:
             candidate_indices=candidate_indices,
             batch_size=batchsize,
         )
-        clean_filter_passed_count = len(clean_correct_indices)
-        selected_clean_correct_indices = slice_clean_correct_indices(
-            candidate_indices=candidate_indices,
-            clean_correct_indices=clean_correct_indices,
-            skip=int(cfg.clean_correct_skip),
-            count=int(cfg.clean_correct_count),
-        )
+        clean_correct_pool_indices = set(clean_correct_indices)
+        clean_filter_passed_count = len(clean_correct_pool_indices)
+        if clean_correct_sample_size > 0:
+            selected_clean_correct_indices = sample_clean_correct_indices(
+                clean_correct_pool_indices,
+                sample_size=clean_correct_sample_size,
+                seed=int(clean_correct_sample_seed),
+            )
+        else:
+            selected_clean_correct_indices = slice_clean_correct_indices(
+                candidate_indices=candidate_indices,
+                clean_correct_indices=clean_correct_pool_indices,
+                skip=int(cfg.clean_correct_skip),
+                count=int(cfg.clean_correct_count),
+            )
         attack_indices = set(selected_clean_correct_indices)
         if not attack_indices:
             raise ValueError(
@@ -452,6 +487,13 @@ def main() -> int:
             f"window_count={int(cfg.clean_correct_count)} "
             f"errors={clean_filter_error_count}"
         )
+        if clean_correct_sample_size > 0:
+            print(
+                "[qwen2_runner] clean-correct sample "
+                f"pool={len(clean_correct_pool_indices)} "
+                f"selected={len(attack_indices)} "
+                f"seed={int(clean_correct_sample_seed)}"
+            )
 
     results: List[dict] = []
     success_count = 0
@@ -638,6 +680,19 @@ def main() -> int:
         "sample_indices_file": str(cfg.sample_indices_file or ""),
         "sample_indices": sample_indices,
         "attack_only_clean_correct": bool(cfg.attack_only_clean_correct),
+        "clean_correct_sample_size": int(clean_correct_sample_size),
+        "clean_correct_sample_seed": (
+            int(clean_correct_sample_seed)
+            if clean_correct_sample_seed is not None
+            else None
+        ),
+        "clean_correct_pool_indices": sorted(clean_correct_pool_indices),
+        "clean_correct_selected_indices": (
+            sorted(attack_indices) if cfg.attack_only_clean_correct else []
+        ),
+        "clean_correct_sampled_count": (
+            int(len(attack_indices)) if cfg.attack_only_clean_correct else 0
+        ),
         "clean_correct_skip": int(cfg.clean_correct_skip),
         "clean_correct_count": int(cfg.clean_correct_count),
         "clean_filter_examined_count": int(len(clean_filter_results)),
