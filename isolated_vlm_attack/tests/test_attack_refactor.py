@@ -43,6 +43,7 @@ from attack_runner_common import (
     load_nips_ground_truth,
     load_preserved_attack_report,
     normalize_attack_mode as normalize_runner_attack_mode,
+    sample_clean_correct_indices,
     select_clean_correct_indices,
 )
 from flux2_blackbox_runtime import Flux2KleinRenderSession
@@ -988,11 +989,57 @@ class AttackModeRefactorTests(unittest.TestCase):
     def test_clean_correct_filter_option_defaults_off_and_parses(self) -> None:
         default_args = build_runner_parser().parse_args([])
         enabled_args = build_runner_parser().parse_args(
-            ["--attack_only_clean_correct", "true"]
+            [
+                "--attack_only_clean_correct",
+                "true",
+                "--clean_correct_sample_size",
+                "100",
+                "--clean_correct_sample_seed",
+                "2",
+            ]
         )
 
         self.assertFalse(default_args.attack_only_clean_correct)
+        self.assertEqual(default_args.clean_correct_sample_size, 0)
+        self.assertIsNone(default_args.clean_correct_sample_seed)
         self.assertTrue(enabled_args.attack_only_clean_correct)
+        self.assertEqual(enabled_args.clean_correct_sample_size, 100)
+        self.assertEqual(enabled_args.clean_correct_sample_seed, 2)
+
+    def test_clean_correct_seeded_sampling_is_exact_and_deterministic(self) -> None:
+        population = set(range(250))
+
+        seed0_first = sample_clean_correct_indices(
+            population,
+            sample_size=100,
+            seed=0,
+        )
+        seed0_second = sample_clean_correct_indices(
+            population,
+            sample_size=100,
+            seed=0,
+        )
+        seed1 = sample_clean_correct_indices(
+            population,
+            sample_size=100,
+            seed=1,
+        )
+
+        self.assertEqual(len(seed0_first), 100)
+        self.assertEqual(seed0_first, seed0_second)
+        self.assertNotEqual(seed0_first, seed1)
+        self.assertTrue(seed0_first <= population)
+
+    def test_clean_correct_seeded_sampling_rejects_an_undersized_pool(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "requested=100 available=99",
+        ):
+            sample_clean_correct_indices(
+                set(range(99)),
+                sample_size=100,
+                seed=0,
+            )
 
     def test_qwen_clean_correct_window_options_default_and_parse(self) -> None:
         default_args = build_qwen_runner_parser().parse_args([])
@@ -1011,6 +1058,24 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertEqual(default_args.clean_correct_count, 0)
         self.assertEqual(selected_args.clean_correct_skip, 100)
         self.assertEqual(selected_args.clean_correct_count, 100)
+
+    def test_qwen_clean_correct_seed_options_default_and_parse(self) -> None:
+        default_args = build_qwen_runner_parser().parse_args([])
+        selected_args = build_qwen_runner_parser().parse_args(
+            [
+                "--attack_only_clean_correct",
+                "true",
+                "--clean_correct_sample_size",
+                "100",
+                "--clean_correct_sample_seed",
+                "7",
+            ]
+        )
+
+        self.assertEqual(default_args.clean_correct_sample_size, 0)
+        self.assertIsNone(default_args.clean_correct_sample_seed)
+        self.assertEqual(selected_args.clean_correct_sample_size, 100)
+        self.assertEqual(selected_args.clean_correct_sample_seed, 7)
 
     def test_qwen_clean_correct_window_preserves_candidate_file_order(self) -> None:
         selected = qwen_runner.slice_clean_correct_indices(
@@ -1383,6 +1448,43 @@ class AttackModeRefactorTests(unittest.TestCase):
         )
         self.assertIn(
             "append_optional CLEAN_CORRECT_COUNT --clean_correct_count",
+            launcher,
+        )
+
+    def test_launcher_forwards_clean_correct_seed_options(self) -> None:
+        launcher = (ISOLATED_ROOT / "run_vlm_attack.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            '"clean_correct_sample_size": "CLEAN_CORRECT_SAMPLE_SIZE"',
+            launcher,
+        )
+        self.assertIn(
+            '"clean_correct_sample_seed": "CLEAN_CORRECT_SAMPLE_SEED"',
+            launcher,
+        )
+        self.assertIn(
+            '--clean_correct_sample_size "$CLEAN_CORRECT_SAMPLE_SIZE"',
+            launcher,
+        )
+        self.assertIn(
+            'CMD+=(--clean_correct_sample_seed "$CLEAN_CORRECT_SAMPLE_SEED")',
+            launcher,
+        )
+
+    def test_qwen_seeded_clean100_launcher_samples_from_all_candidates(self) -> None:
+        launcher = (
+            ISOLATED_ROOT / "run_qwen_vlm_res_seeded_clean100.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('SAMPLE_SIZE="${CLEAN_CORRECT_SAMPLE_SIZE:-100}"', launcher)
+        self.assertIn('SAMPLE_SEED="${CLEAN_CORRECT_SAMPLE_SEED:-${SEED:-0}}"', launcher)
+        self.assertIn('export SAMPLE_INDICES_FILE=""', launcher)
+        self.assertIn('export START_INDEX=0', launcher)
+        self.assertIn('--clean_correct_sample_size "$SAMPLE_SIZE"', launcher)
+        self.assertIn('--clean_correct_sample_seed "$SAMPLE_SEED"', launcher)
+        self.assertIn('--manual_seed "$GENERATION_SEED"', launcher)
+        self.assertIn(
+            'exec bash "$SCRIPT_DIR/run_qwen_vlm_res_remote.sh"',
             launcher,
         )
 
