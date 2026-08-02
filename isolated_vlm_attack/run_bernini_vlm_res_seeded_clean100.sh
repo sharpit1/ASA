@@ -32,6 +32,7 @@ if [[ -z "${PYTHON_BIN:-}" && -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
   export PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
 fi
 export ASA_PROJECT_ROOT="$PROJECT_ROOT"
+export CONFIG_PATH
 
 # Seed sampling must use the full candidate range, not a fixed indices file.
 export SAMPLE_INDICES=""
@@ -46,8 +47,7 @@ echo "[bernini_seeded_clean100] clean_correct_sample_seed=$SAMPLE_SEED"
 echo "[bernini_seeded_clean100] manual_seed=$GENERATION_SEED"
 echo "[bernini_seeded_clean100] run_name=$RUN_NAME"
 
-exec bash "$SCRIPT_DIR/run_vlm_attack.sh" \
-  --config "$CONFIG_PATH" \
+exec bash "$SCRIPT_DIR/run_bernini_vlm_res_remote.sh" \
   --attack_mode vlm \
   --victim_model resnet50 \
   --attack_only_clean_correct true \
