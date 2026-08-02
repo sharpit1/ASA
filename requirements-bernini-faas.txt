@@ -1,0 +1,11 @@
+# Bernini additions for the kau/pytorch-master FaaS image.
+# The shared file installs ART and the ASA runtime dependencies without
+# replacing the provider CUDA/PyTorch stack.
+-r requirements-faas.txt
+
+# Additional packages imported by the pinned Bernini inference source.
+ftfy>=6.2,<7
+ninja>=1.11,<2
+decord>=0.6,<1
+imageio>=2.34,<3
+imageio-ffmpeg>=0.5,<1

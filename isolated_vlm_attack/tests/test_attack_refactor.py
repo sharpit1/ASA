@@ -1547,11 +1547,34 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertIn('--clean_correct_sample_size "$SAMPLE_SIZE"', common)
         self.assertIn('--clean_correct_sample_seed "$SAMPLE_SEED"', common)
         self.assertIn('--manual_seed "$GENERATION_SEED"', common)
-        self.assertIn('exec bash "$SCRIPT_DIR/run_vlm_attack.sh"', common)
+        self.assertIn(
+            'exec bash "$SCRIPT_DIR/run_bernini_vlm_res_remote.sh"',
+            common,
+        )
         self.assertIn('export CLEAN_CORRECT_SAMPLE_SEED=0', seed0)
         self.assertIn('export MANUAL_SEED=0', seed0)
         self.assertIn('export CLEAN_CORRECT_SAMPLE_SEED=1', seed1)
         self.assertIn('export MANUAL_SEED=1', seed1)
+
+    def test_bernini_remote_bootstrap_installs_art_and_pins_compatible_source(self) -> None:
+        bootstrap = (
+            ISOLATED_ROOT / "run_bernini_vlm_res_remote.sh"
+        ).read_text(encoding="utf-8")
+        requirements = (
+            ISOLATED_ROOT.parent / "requirements-bernini-faas.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("-r requirements-faas.txt", requirements)
+        self.assertIn("decord", requirements)
+        self.assertIn("requirements-bernini-faas.txt", bootstrap)
+        self.assertIn(
+            "from art.estimators.classification import PyTorchClassifier",
+            bootstrap,
+        )
+        self.assertIn("https://github.com/bytedance/Bernini.git", bootstrap)
+        self.assertIn("9a366af09c93a94a014e7c6df9782155a67908ef", bootstrap)
+        self.assertIn("ByteDance/Bernini-R-Diffusers", bootstrap)
+        self.assertNotIn("python -m venv", bootstrap)
 
     def test_qwen_second_clean100_launcher_uses_target_200_window(self) -> None:
         launcher_path = (
