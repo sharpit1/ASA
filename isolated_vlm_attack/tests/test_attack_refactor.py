@@ -2063,7 +2063,7 @@ class AttackModeRefactorTests(unittest.TestCase):
                 },
                 {
                     "final_attack_success": False,
-                    "victim_query_count": 100,
+                    "victim_query_count": 37,
                 },
                 {
                     "attack_success_before_failure": True,
@@ -2080,9 +2080,9 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertEqual(metrics["successful_attack_query_count_recorded"], 2)
         self.assertEqual(metrics["successful_attack_query_mean"], 4.0)
         self.assertEqual(metrics["all_sample_query_count_recorded"], 3)
-        self.assertEqual(metrics["all_sample_query_mean"], 37.0)
+        self.assertEqual(metrics["all_sample_query_mean"], 36.0)
 
-    def test_qwen_query_summary_marks_incomplete_average_unknown(self) -> None:
+    def test_qwen_query_summary_assigns_100_to_failed_sample(self) -> None:
         metrics = qwen_runner.summarize_attack_query_metrics(
             [
                 {
@@ -2094,8 +2094,8 @@ class AttackModeRefactorTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(metrics["all_sample_query_count_recorded"], 1)
-        self.assertIsNone(metrics["all_sample_query_mean"])
+        self.assertEqual(metrics["all_sample_query_count_recorded"], 2)
+        self.assertEqual(metrics["all_sample_query_mean"], 51.0)
 
     def test_bernini_query_summary_reports_success_and_all_sample_means(self) -> None:
         metrics = bernini_runner.summarize_attack_query_metrics(
@@ -2107,7 +2107,7 @@ class AttackModeRefactorTests(unittest.TestCase):
                 },
                 {
                     "final_attack_success": False,
-                    "victim_query_count": 100,
+                    "victim_query_count": 37,
                 },
                 {
                     "attack_success_before_failure": True,
@@ -2124,7 +2124,7 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertEqual(metrics["successful_attack_query_count_recorded"], 2)
         self.assertEqual(metrics["successful_attack_query_mean"], 4.0)
         self.assertEqual(metrics["all_sample_query_count_recorded"], 3)
-        self.assertEqual(metrics["all_sample_query_mean"], 37.0)
+        self.assertEqual(metrics["all_sample_query_mean"], 36.0)
 
     def test_class_ablation_config_is_isolated_from_the_baseline(self) -> None:
         config_root = Path(__file__).resolve().parents[1] / "configs"

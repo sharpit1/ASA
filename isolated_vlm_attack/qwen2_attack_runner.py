@@ -143,7 +143,7 @@ def _result_query_count(result: dict, key: str):
 
 
 def summarize_attack_query_metrics(results: Sequence[dict]) -> dict:
-    """Aggregate attack success and victim-query metrics without inventing missing counts."""
+    """Aggregate success queries, assigning 100 queries to each failed sample."""
 
     normalized_results = [item for item in results if isinstance(item, dict)]
     total_processed = len(normalized_results)
@@ -163,14 +163,21 @@ def summarize_attack_query_metrics(results: Sequence[dict]) -> dict:
         )
         if value is not None
     ]
-    all_query_counts = [
-        value
-        for value in (
-            _result_query_count(item, "victim_query_count")
-            for item in normalized_results
+    all_query_counts = []
+    for item in normalized_results:
+        attack_succeeded = (
+            item.get("final_attack_success") is True
+            or item.get("attack_success_before_failure") is True
         )
-        if value is not None
-    ]
+        if attack_succeeded:
+            success_query_count = _result_query_count(
+                item,
+                "attack_success_query_count",
+            )
+            if success_query_count is not None:
+                all_query_counts.append(success_query_count)
+        else:
+            all_query_counts.append(100)
 
     success_mean = None
     if successful_query_counts and len(successful_query_counts) == attack_success_count:
