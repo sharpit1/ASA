@@ -44,6 +44,7 @@ def _resolve_vim_root():
 _VIM_ROOT = _resolve_vim_root()
 _VIM_MODEL_ROOT = _VIM_ROOT / "vim"
 _VIM_MAMBA_ROOT = _VIM_ROOT / "mamba-1p1p1"
+_VIM_CAUSAL_CONV_ROOT = _VIM_ROOT / "causal-conv1d"
 _CKPT_ROOT = _REPO_ROOT / "ckpt"
 _TORCH_HUB_ROOT = _CKPT_ROOT / "torch_hub"
 torch.hub.set_dir(str(_TORCH_HUB_ROOT))
@@ -362,7 +363,7 @@ def get_vim_model(type="small", *, use_local_mamba: bool = False):
 
     import_paths = [_VIM_MODEL_ROOT]
     if use_local_mamba:
-        import_paths.insert(0, _VIM_MAMBA_ROOT)
+        import_paths[:0] = [_VIM_MAMBA_ROOT, _VIM_CAUSAL_CONV_ROOT]
     with _prepend_import_paths(*import_paths):
         import models_mamba
 

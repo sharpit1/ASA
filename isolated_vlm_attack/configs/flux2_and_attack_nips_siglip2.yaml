@@ -1,30 +1,34 @@
-# Flux2 Klein black-box AND attack preset.
+# Flux2 Klein black-box AND attack preset for SigLIP 2.
 # Usage:
-#   CONFIG=configs/flux2_and_attack_nips_swin.yaml ./run_vlm_attack.sh
-#   HF_TOKEN=... CONFIG=configs/flux2_and_attack_nips_swin.yaml ./run_vlm_attack.sh
+#   CONFIG=configs/flux2_and_attack_nips_siglip2.yaml ./run_vlm_attack.sh
+#   HF_TOKEN=... CONFIG=configs/flux2_and_attack_nips_siglip2.yaml ./run_vlm_attack.sh
 
 script_path: flux2_attack_runner.py
-# cuda_visible_devices: "5"
 hf_token_env: HF_TOKEN
 dataset_root: data/nips2017
 output_root: outputs
 wandb_enable: false
 
-
 run_args:
   attack_mode: and
   gcg_scene_vocab_prompts_per_strategy: 1
+  gcg_scene_vocab_enabled_strategies: all
   dataset_root: data/nips2017
   dataset_name: nips2017
   output_root: outputs
-  run_name: ablation_and_no_verifier
-  wandb_project: swin_flux2_greedy_and_attack_q100
+  run_name: flux2_and_attack_q100_eval
+  wandb_project: siglip2_flux2_and_attack_q100
   start_index: 0
   max_samples: 1000
+  attack_only_clean_correct: true
+  clean_correct_sample_size: 100
+  clean_correct_sample_seed: 0
 
-  victim_model: swin
+  # The short alias is normalized to google/siglip2-base-patch16-224 by
+  # VictimModelAdapter and keeps the output directory name filesystem-safe.
+  victim_model: siglip2
   device: cuda
-  manual_seed: 123
+  manual_seed: 0
   classifier_objective: logit_margin_max
 
   model_path: black-forest-labs/FLUX.2-klein-9b-kv
@@ -39,24 +43,23 @@ run_args:
   width: 1024
   num_inference_steps: 4
   max_sequence_length: 512
-  # guidance_scale: 3.0
-  gcg_candidate_source:  gemma_scene_vocab
+  gcg_candidate_source: gemma_scene_vocab
   gcg_scene_vocab_size: 3
   scene_fallback: outdoor
-
 
   wandb_mode: auto
   wandb_log_every: 1
 
   scene_vlm_backend: gemma4
-  scene_vlm_model_id: google/gemma-4-E4B-it #  google/gemma-3-27b-it |google/gemma-4-E4B-it |  google/gemma-4-26B-A4B-it | google/gemma-4-31B-it
+  scene_vlm_model_id: google/gemma-4-E4B-it
   scene_vlm_device: auto
   scene_vlm_max_new_tokens: 4096
   scene_vlm_thinking: false
   scene_vlm_do_sample: false
-  gcg_scene_llm_model_id: google/gemma-4-E4B-it # google/gemma-3-12b-it |google/gemma-4-E4B-it |  google/gemma-4-26B-A4B-it | google/gemma-4-31B-it
+  gcg_scene_llm_model_id: google/gemma-4-E4B-it
   gcg_scene_llm_thinking: false
   gcg_scene_llm_do_sample: true
   gcg_slot_candidate_max_words: 5
   gcg_early_stop_on_attack_success: true
   gcg_eval_naturalness_on_attack_success: true
+  gcg_eval_naturalness_llm_thinking: false

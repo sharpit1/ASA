@@ -5,6 +5,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Sequence
 
 from PIL import Image
@@ -197,6 +198,167 @@ def _format_query_mean(value) -> str:
     return "n/a" if value is None else f"{float(value):.2f}"
 
 
+def _collect_report_runtime_errors(value, path="$"):
+    error_keys = {
+        "vlm_error",
+        "naturalness_error",
+        "attack_success_naturalness_error",
+    }
+    allowed_sentinel = "skipped_text_eval_due_to_cwor_success"
+    found = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            item_path = f"{path}.{key}"
+            if key in error_keys:
+                text = str(item or "").strip()
+                if text and text != allowed_sentinel:
+                    found.append({"path": item_path, "error": text})
+            found.extend(_collect_report_runtime_errors(item, item_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(
+                _collect_report_runtime_errors(item, f"{path}[{index}]")
+            )
+    return found
+
+
+def load_resumable_report(
+    report_path: Path,
+    *,
+    cfg,
+    sample_index: int,
+    image_id: str,
+    true_label: int,
+    target_label: int,
+    sample_dir: Path,
+):
+    if not report_path.is_file():
+        return None
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("status") == "failed":
+        return None
+    if payload.get("error") or payload.get("traceback"):
+        return None
+    if not isinstance(payload.get("final_attack_success"), bool):
+        return None
+    if _collect_report_runtime_errors(payload):
+        return None
+
+    report_args = payload.get("args")
+    if not isinstance(report_args, dict):
+        return None
+    expected_args = {
+        "model_path": str(cfg.model_path),
+        "attack_mode": str(cfg.attack_mode),
+        "strategy_mllm_mode": str(cfg.strategy_mllm_mode),
+        "gcg_scene_vocab_enabled_strategies": str(
+            cfg.gcg_scene_vocab_enabled_strategies
+        ),
+        "gcg_scene_vocab_prompts_per_strategy": int(
+            cfg.gcg_scene_vocab_prompts_per_strategy
+        ),
+        "gcg_scene_llm_do_sample": bool(cfg.gcg_scene_llm_do_sample),
+        "gcg_eval_naturalness_on_attack_success": bool(
+            cfg.gcg_eval_naturalness_on_attack_success
+        ),
+        "gcg_eval_naturalness_llm_thinking": bool(
+            cfg.gcg_eval_naturalness_llm_thinking
+        ),
+        "seed": int(cfg.manual_seed),
+    }
+    if any(report_args.get(key) != expected for key, expected in expected_args.items()):
+        return None
+
+    strategy = payload.get("strategy_generator")
+    naturalness = payload.get("naturalness_verifier")
+    if not isinstance(strategy, dict) or not isinstance(naturalness, dict):
+        return None
+    if (
+        strategy.get("mode") != str(cfg.strategy_mllm_mode)
+        or strategy.get("do_sample") is not bool(cfg.gcg_scene_llm_do_sample)
+        or naturalness.get("mode") != str(cfg.strategy_mllm_mode)
+        or naturalness.get("enabled") is not True
+        or naturalness.get("do_sample") is not bool(cfg.scene_vlm_do_sample)
+    ):
+        return None
+
+    strategy_steps = 0
+    expected_slot_count = (
+        0
+        if str(cfg.gcg_scene_vocab_enabled_strategies).strip().lower() == "none"
+        else 3
+    )
+    for entry in payload.get("history", []):
+        if not isinstance(entry, dict):
+            continue
+        if not str(entry.get("raw_vlm_answer") or "").strip():
+            continue
+        strategy_steps += 1
+        if int(entry.get("strategy_query_accounting_version", 0) or 0) != 3:
+            return None
+        if int(entry.get("strategy_slot_count", 0) or 0) != expected_slot_count:
+            return None
+        duplicate_count = int(
+            entry.get("strategy_duplicate_skipped_count", 0) or 0
+        )
+        duplicate_queries = int(
+            entry.get("strategy_duplicate_query_count", 0) or 0
+        )
+        if duplicate_queries != duplicate_count:
+            return None
+    if strategy_steps == 0:
+        return None
+
+    result = dict(payload)
+    result.update(
+        {
+            "sample_index": int(sample_index),
+            "image_id": str(image_id),
+            "true_label": int(true_label),
+            "target_label": int(target_label),
+            "sample_dir": str(sample_dir),
+            "resumed_from_existing_report": True,
+        }
+    )
+    return result
+
+
+def build_resume_validation_config(cfg, passthrough_core_args):
+    core_args, core_unknown = parse_core_args(
+        ["--model_path", str(cfg.model_path), *list(passthrough_core_args)]
+    )
+    if core_unknown:
+        raise ValueError(
+            "unsupported passthrough args while building resume validation "
+            f"config: {core_unknown}"
+        )
+    return SimpleNamespace(
+        model_path=str(cfg.model_path),
+        attack_mode=str(cfg.attack_mode),
+        strategy_mllm_mode=str(cfg.strategy_mllm_mode),
+        gcg_scene_vocab_enabled_strategies=str(
+            cfg.gcg_scene_vocab_enabled_strategies
+        ),
+        gcg_scene_vocab_prompts_per_strategy=int(
+            cfg.gcg_scene_vocab_prompts_per_strategy
+        ),
+        gcg_scene_llm_do_sample=bool(core_args.gcg_scene_llm_do_sample),
+        gcg_eval_naturalness_on_attack_success=bool(
+            core_args.gcg_eval_naturalness_on_attack_success
+        ),
+        gcg_eval_naturalness_llm_thinking=bool(
+            core_args.gcg_eval_naturalness_llm_thinking
+        ),
+        scene_vlm_do_sample=bool(core_args.scene_vlm_do_sample),
+        manual_seed=int(cfg.manual_seed),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = base_build_parser()
     parser.description = "Qwen Image Edit 2511 black-box attack runner."
@@ -231,6 +393,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Attack exactly this many clean-correct candidates after the skip; 0 means all.",
+    )
+    parser.add_argument(
+        "--resume_existing_reports",
+        type=parse_bool_flag,
+        default=False,
     )
     return parser
 
@@ -314,6 +481,11 @@ def main() -> int:
     cfg, passthrough_core_args = parser.parse_known_args()
     validate_passthrough_core_args(passthrough_core_args)
     configure_qwen_attack_mode(cfg)
+    resume_validation_cfg = (
+        build_resume_validation_config(cfg, passthrough_core_args)
+        if bool(cfg.resume_existing_reports)
+        else None
+    )
 
     validate_generator_model(cfg.model_path, expected_family="qwen-image-edit")
 
@@ -529,6 +701,29 @@ def main() -> int:
                 sample_run_name = f"{run_name}_{image_id}"
                 sample_start_time = time.perf_counter()
                 image_save_timer = ImageSaveTimer()
+
+                if bool(cfg.resume_existing_reports):
+                    resumed_result = load_resumable_report(
+                        report_path,
+                        cfg=resume_validation_cfg,
+                        sample_index=idx,
+                        image_id=image_id,
+                        true_label=true_label,
+                        target_label=target_label,
+                        sample_dir=sample_dir,
+                    )
+                    if resumed_result is not None:
+                        results.append(resumed_result)
+                        success_count += 1
+                        if resumed_result.get("final_attack_success") is True:
+                            attack_success_count += 1
+                        else:
+                            attack_failure_count += 1
+                        print(
+                            f"[qwen2_runner] resume sample {idx:04d} "
+                            "from verified existing report"
+                        )
+                        continue
 
                 print(f"[qwen2_runner] sample {idx:04d} image_id={image_id} label={true_label}")
                 sample_dir.mkdir(parents=True, exist_ok=True)
