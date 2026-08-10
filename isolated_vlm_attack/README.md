@@ -9,7 +9,7 @@ This directory contains the supported, reduced attack pipeline only.
 - Three generator-specific runners and runtimes
 - Shared black-box attack core and minimal VLM helpers
 - In-memory candidate-image handoff without strip serialization
-- 33 supported YAML presets
+- 32 supported YAML presets
 - Static/unit verification tests
 
 Successful classifier-input images are saved immediately at 224x224. The

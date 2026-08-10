@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import runpy
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 ISOLATED_ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +49,10 @@ from attack_runner_common import (
     select_clean_correct_indices,
 )
 from flux2_blackbox_runtime import Flux2KleinRenderSession
+from flux2_attack_runner import (
+    build_resume_validation_config,
+    load_resumable_report,
+)
 from qwen2_attack_runner import (
     apply_qwen_runtime_args,
     build_parser as build_qwen_runner_parser,
@@ -59,6 +64,7 @@ from qwen_image_edit_batch import (
 )
 from vlm_attack_blackbox_core import (
     _resolve_prompt,
+    infer_imagenet_class_name,
     merge_scene_vocab_feedback_history,
     normalize_attack_mode as normalize_core_attack_mode,
     parse_core_args,
@@ -75,6 +81,17 @@ from vlm_attack import (
     image_to_tensor_01,
     parse_naturalness_eval_answer,
     save_blackbox_prompt_artifacts,
+)
+from vlm_runtime import (
+    INTERNVL3_5_4B_MODEL_ID,
+    INTERNVL3_5_4B_INSTRUCT_MODEL_ID,
+    QWEN3_VL_4B_INSTRUCT_MODEL_ID,
+    _InternVLChatRuntime,
+    _ask_with_internvl_chat,
+    _ask_with_qwen_pipeline,
+    load_vlm_runtime,
+    normalize_strategy_mllm_mode,
+    resolve_strategy_mllm_runtime,
 )
 
 
@@ -370,6 +387,49 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertFalse(query_kwargs["do_sample"])
         self.assertIn("Left: source image", query_kwargs["question"])
         self.assertIn("Right: edited image", query_kwargs["question"])
+        self.assertNotIn(
+            "SEMANTIC-PRIVACY REQUIREMENT",
+            query_kwargs["question"],
+        )
+
+        class_ablation_args = SimpleNamespace(
+            **{
+                **vars(args),
+                "class_ablation": True,
+                "class_name": None,
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=('{"natural": true, "feedback": ""}', None),
+        ) as class_ablation_query:
+            evaluate_attack_success_naturalness(
+                image_path=Path("comparison.png"),
+                candidate_prompt="ignored",
+                args=class_ablation_args,
+                is_source_vs_edited_comparison=True,
+            )
+
+        class_ablation_question = (
+            class_ablation_query.call_args.kwargs["question"]
+        )
+        self.assertIn(
+            "SEMANTIC-PRIVACY REQUIREMENT",
+            class_ablation_question,
+        )
+        self.assertIn(
+            "Do not identify, name, classify, describe, or infer any object",
+            class_ablation_question,
+        )
+        self.assertIn(
+            'Refer to image content only as "the main subject", '
+            '"the source image",',
+            class_ablation_question,
+        )
+        self.assertIn(
+            "Do not provide any explanation or free-form feedback.",
+            class_ablation_question,
+        )
 
         with patch(
             "vlm_attack.query_vlm_text",
@@ -951,6 +1011,163 @@ class AttackModeRefactorTests(unittest.TestCase):
                     (0, 0, 255),
                 )
 
+    def test_and_mode_charges_duplicate_but_not_empty_strategy_slot(self) -> None:
+        class CorrectBaselineClassifier:
+            @staticmethod
+            def objective_and_stats(_image_01, target_label=None):
+                del target_label
+                return 0.0, {
+                    "pred_idx": 0,
+                    "pred_conf": 1.0,
+                    "pred_logit": 5.0,
+                    "target_conf": 1.0,
+                    "target_logit": 5.0,
+                    "target_label_conf": None,
+                    "target_label_logit": None,
+                    "ce": 0.0,
+                }
+
+        class DuplicateAndEmptyRuntime:
+            def __init__(self) -> None:
+                self.last_prompt_query_count = 0
+                self.last_and_query_count = 0
+                self.evaluate_calls = 0
+
+            def setup(self, **_kwargs):
+                return None
+
+            def close(self):
+                return None
+
+            def reset_cwor_state(self):
+                return None
+
+            def generate_scene_vocab_words(self, *, args, **_kwargs):
+                args._scene_vocab_strategy_entries = [
+                    {
+                        "word": "repeat me",
+                        "strategy_name": "background_shift",
+                        "strategy_title": "Background Shift",
+                    },
+                    {
+                        "word": "coated in brushed metal",
+                        "strategy_name": "texture_material",
+                        "strategy_title": "Texture & Material",
+                    },
+                ]
+                args._scene_vocab_strategy_slots = [
+                    {
+                        "word": "repeat me",
+                        "strategy_name": "background_shift",
+                        "strategy_title": "Background Shift",
+                        "empty": False,
+                    },
+                    {
+                        "word": "",
+                        "strategy_name": "weather_atmosphere",
+                        "strategy_title": "Weather & Atmosphere",
+                        "empty": True,
+                    },
+                    {
+                        "word": "coated in brushed metal",
+                        "strategy_name": "texture_material",
+                        "strategy_title": "Texture & Material",
+                        "empty": False,
+                    },
+                ]
+                return (
+                    ["repeat me", "coated in brushed metal"],
+                    '{"strategies": {}}',
+                    "prompt",
+                    None,
+                )
+
+            def query_vlm_word(self, **_kwargs):
+                raise AssertionError("empty strategy slots must not trigger fallback")
+
+            def evaluate_candidates(self, *, candidate_words, candidate_prompts, **_kwargs):
+                self.evaluate_calls += 1
+                self.last_prompt_query_count = 1
+                assert candidate_words == ["coated in brushed metal"]
+                assert candidate_prompts == ["coated in brushed metal"]
+                return (
+                    [
+                        {
+                            "candidate_word": "coated in brushed metal",
+                            "candidate_prompt": "coated in brushed metal",
+                            "candidate_objective": 1.0,
+                            "pred_idx": 0,
+                            "candidate_variant": "prompt",
+                        }
+                    ],
+                    None,
+                    None,
+                )
+
+            def evaluate_and_candidate(self, **_kwargs):
+                raise AssertionError("duplicate consumed the remaining AND query slot")
+
+            def save_prompt_artifacts(self, **_kwargs):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "source.png"
+            output_path = root / "attack_success.png"
+            report_path = root / "report.json"
+            Image.new("RGB", (20, 20), "white").save(input_path)
+            args, unknown = parse_core_args(
+                [
+                    "--model_path",
+                    "black-forest-labs/FLUX.2-klein-9b-kv",
+                    "--attack_mode",
+                    "and",
+                    "--input_img_path",
+                    str(input_path),
+                    "--output_path",
+                    str(output_path),
+                    "--report_path",
+                    str(report_path),
+                    "--prompt",
+                    "repeat me",
+                    "--gcg_word",
+                    "repeat",
+                    "--gcg_steps",
+                    "1",
+                    "--gcg_batch_size",
+                    "3",
+                    "--gcg_scene_vocab_prompts_per_strategy",
+                    "1",
+                    "--max_victim_queries",
+                    "2",
+                    "--classifier_label",
+                    "0",
+                    "--gcg_eval_naturalness_on_attack_success",
+                    "false",
+                    "--device",
+                    "cpu",
+                ]
+            )
+            runtime = DuplicateAndEmptyRuntime()
+            result = run_blackbox_attack_core(
+                args=args,
+                unknown_args=unknown,
+                classifier=CorrectBaselineClassifier(),
+                runtime=runtime,
+                manage_runtime=True,
+            )
+
+            self.assertEqual(runtime.evaluate_calls, 1)
+            self.assertEqual(result["victim_query_count"], 2)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            entry = report["history"][0]
+            self.assertEqual(entry["strategy_slot_count"], 3)
+            self.assertEqual(entry["strategy_empty_skipped_count"], 1)
+            self.assertEqual(entry["strategy_duplicate_skipped_count"], 1)
+            self.assertEqual(entry["strategy_duplicate_query_count"], 1)
+            self.assertEqual(entry["candidate_text_count"], 1)
+            self.assertEqual(entry["victim_queries_this_step"], 2)
+
     def test_class_ablation_defaults_off_and_parses_in_runner_and_core(self) -> None:
         runner_default = build_runner_parser().parse_args([])
         runner_enabled = build_runner_parser().parse_args(
@@ -986,6 +1203,742 @@ class AttackModeRefactorTests(unittest.TestCase):
         option_index = propagated_cli.index("--class_ablation")
         self.assertEqual(propagated_cli[option_index + 1], "1")
         self.assertEqual(propagated_cli.count("--class_ablation"), 1)
+
+    def test_naturalness_verifier_defaults_on_and_can_be_disabled(self) -> None:
+        core_default, _ = parse_core_args(
+            ["--model_path", "black-forest-labs/FLUX.2-klein-9b-kv"]
+        )
+        core_disabled, _ = parse_core_args(
+            [
+                "--model_path",
+                "black-forest-labs/FLUX.2-klein-9b-kv",
+                "--gcg_eval_naturalness_on_attack_success",
+                "false",
+            ]
+        )
+
+        self.assertTrue(core_default.gcg_eval_naturalness_on_attack_success)
+        self.assertFalse(core_disabled.gcg_eval_naturalness_on_attack_success)
+
+        config_root = Path(__file__).resolve().parents[1] / "configs"
+        for config_name in (
+            "flux2_and_attack_nips.yaml",
+            "flux2_and_attack_nips_swin.yaml",
+            "flux2_and_attack_nips_vim.yaml",
+        ):
+            with self.subTest(config=config_name):
+                config = yaml.safe_load(
+                    (config_root / config_name).read_text(encoding="utf-8")
+                )
+                self.assertIs(
+                    config["run_args"][
+                        "gcg_eval_naturalness_on_attack_success"
+                    ],
+                    True,
+                )
+
+    def test_strategy_mllm_modes_parse_and_propagate(self) -> None:
+        runner_args = build_runner_parser().parse_args(
+            ["--strategy_mllm_mode", "qwen3-vl-4b-instruct"]
+        )
+        core_args, _ = parse_core_args(
+            [
+                "--model_path",
+                "black-forest-labs/FLUX.2-klein-9b-kv",
+                "--strategy_mllm_mode",
+                "qwen3_vl_4b_instruct",
+            ]
+        )
+
+        self.assertEqual(
+            normalize_strategy_mllm_mode("Qwen/Qwen3-VL-4B-Instruct"),
+            "qwen3_vl_4b_instruct",
+        )
+        self.assertEqual(runner_args.strategy_mllm_mode, "qwen3_vl_4b_instruct")
+        self.assertEqual(core_args.strategy_mllm_mode, "qwen3_vl_4b_instruct")
+
+        propagated_cli = build_core_cli(
+            cfg=runner_args,
+            hf_token="",
+            sample_image_path=Path("input.png"),
+            output_path=Path("output.png"),
+            report_path=Path("report.json"),
+            classifier_label=1,
+            sample_target_label=None,
+            sample_run_name="qwen3-vl-strategy-test",
+        )
+        option_index = propagated_cli.index("--strategy_mllm_mode")
+        self.assertEqual(
+            propagated_cli[option_index + 1],
+            "qwen3_vl_4b_instruct",
+        )
+        self.assertEqual(propagated_cli.count("--strategy_mllm_mode"), 1)
+
+        internvl_runner_args = build_runner_parser().parse_args(
+            ["--strategy_mllm_mode", "InternVL3.5-4B"]
+        )
+        internvl_core_args, _ = parse_core_args(
+            [
+                "--model_path",
+                "black-forest-labs/FLUX.2-klein-9b-kv",
+                "--strategy_mllm_mode",
+                "internvl3_5_4b",
+            ]
+        )
+        self.assertEqual(
+            internvl_runner_args.strategy_mllm_mode,
+            "internvl3_5_4b",
+        )
+        self.assertEqual(
+            internvl_core_args.strategy_mllm_mode,
+            "internvl3_5_4b",
+        )
+        internvl_instruct_args = build_runner_parser().parse_args(
+            ["--strategy_mllm_mode", "InternVL3.5-4B-Instruct"]
+        )
+        self.assertEqual(
+            internvl_instruct_args.strategy_mllm_mode,
+            "internvl3_5_4b_instruct",
+        )
+
+    def test_qwen3_vl_strategy_mode_matches_naturalness_verifier(self) -> None:
+        resolved = resolve_strategy_mllm_runtime(
+            mode="qwen3_vl_4b_instruct",
+            configured_backend="gemma4",
+            configured_model_id="google/gemma-4-E4B-it",
+            configured_thinking=True,
+            configured_do_sample=True,
+        )
+        self.assertEqual(
+            resolved,
+            (
+                "qwen3_vl_4b_instruct",
+                "qwen",
+                QWEN3_VL_4B_INSTRUCT_MODEL_ID,
+                False,
+                True,
+            ),
+        )
+
+        args = SimpleNamespace(
+            strategy_mllm_mode="qwen3_vl_4b_instruct",
+            class_ablation=False,
+            class_name="goldfish",
+            classifier_name="resnet50",
+            model_path="black-forest-labs/FLUX.2-klein-9b-kv",
+            bernini_edit_prompt_mode=False,
+            qwen_edit_prompt_mode=False,
+            qwen_strategy_and_enable=False,
+            gcg_occurrence=0,
+            gcg_scene_vocab_topic=None,
+            gcg_scene_vocab_size=3,
+            gcg_scene_vocab_prompts_per_strategy=1,
+            gcg_scene_vocab_enabled_strategies="all",
+            gcg_slot_candidate_max_words=5,
+            gcg_scene_vocab_feedback=False,
+            gcg_scene_feedback_limit=1000,
+            cwor_enable=True,
+            gcg_scene_llm_backend="gemma4",
+            gcg_scene_llm_model_id="google/gemma-4-E4B-it",
+            gcg_scene_llm_device="cpu",
+            gcg_scene_llm_max_new_tokens=128,
+            gcg_scene_llm_thinking=True,
+            gcg_scene_llm_do_sample=True,
+            gcg_eval_naturalness_llm_thinking=False,
+        )
+        strategy_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": ["move into a forest"],
+                    "weather_atmosphere": ["add soft rain"],
+                    "texture_material": ["coated in brushed metal"],
+                }
+            }
+        )
+
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=(strategy_answer, None),
+        ) as query:
+            words, _, _, strategy_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=0,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertIsNone(strategy_error)
+        self.assertEqual(
+            words,
+            [
+                "move into a forest",
+                "add soft rain",
+                "coated in brushed metal",
+            ],
+        )
+        self.assertEqual(
+            [item["strategy_name"] for item in args._scene_vocab_strategy_entries],
+            [
+                "background_shift",
+                "weather_atmosphere",
+                "texture_material",
+            ],
+        )
+        strategy_call = query.call_args.kwargs
+        self.assertEqual(strategy_call["vlm_backend"], "qwen")
+        self.assertEqual(
+            strategy_call["vlm_model_id"],
+            QWEN3_VL_4B_INSTRUCT_MODEL_ID,
+        )
+        self.assertFalse(strategy_call["enable_thinking"])
+        self.assertTrue(strategy_call["do_sample"])
+
+        object_wrapped_strategy_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": {
+                        "candidates": ["move into a forest"]
+                    },
+                    "weather_atmosphere": {
+                        "candidates": ["add soft rain"]
+                    },
+                    "texture_material": {
+                        "candidates": ["coated in brushed metal"]
+                    },
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=(object_wrapped_strategy_answer, None),
+        ):
+            wrapped_words, _, _, wrapped_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=1,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertIsNone(wrapped_error)
+        self.assertEqual(
+            wrapped_words,
+            [
+                "move into a forest",
+                "add soft rain",
+                "coated in brushed metal",
+            ],
+        )
+
+        repeated_current_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": ["move into a warehouse"],
+                    "weather_atmosphere": ["add soft rain"],
+                    "texture_material": ["coated in brushed metal"],
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            side_effect=[
+                (repeated_current_answer, None),
+                (repeated_current_answer, None),
+                (strategy_answer, None),
+            ],
+        ) as repeated_current_query:
+            repeated_current_words, _, repeated_current_prompt, repeated_current_error = (
+                generate_scene_vocab_words(
+                    args=args,
+                    step_idx=2,
+                    current_prompt="move into a warehouse",
+                    current_word="background",
+                    slot_kind="scene",
+                    best_objective=0.0,
+                    previous_feedback=[],
+                    reference_image_path=Path("unused-reference.png"),
+                    fallback_word="outdoor",
+                )
+            )
+
+        self.assertIsNone(repeated_current_error)
+        self.assertEqual(
+            repeated_current_words,
+            [
+                "move into a warehouse",
+                "add soft rain",
+                "coated in brushed metal",
+            ],
+        )
+        self.assertEqual(repeated_current_query.call_count, 1)
+        self.assertNotIn("CONTRACT CORRECTION", repeated_current_prompt)
+        self.assertEqual(
+            [slot["empty"] for slot in args._scene_vocab_strategy_slots],
+            [False, False, False],
+        )
+
+        empty_then_valid_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": [],
+                    "weather_atmosphere": [],
+                    "texture_material": [],
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            side_effect=[
+                (empty_then_valid_answer, None),
+                (strategy_answer, None),
+            ],
+        ) as retry_query:
+            retry_words, _, retry_prompt, retry_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=2,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertIsNone(retry_error)
+        self.assertEqual(retry_words, [])
+        self.assertEqual(retry_query.call_count, 1)
+        self.assertNotIn("CONTRACT CORRECTION", retry_prompt)
+        self.assertEqual(
+            [slot["empty"] for slot in args._scene_vocab_strategy_slots],
+            [True, True, True],
+        )
+
+        incomplete_strategy_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": ["move into a forest"],
+                    "weather_atmosphere": ["add soft rain"],
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=(incomplete_strategy_answer, None),
+        ):
+            incomplete_words, _, _, incomplete_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=1,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertEqual(
+            incomplete_words,
+            ["move into a forest", "add soft rain"],
+        )
+        self.assertIsNone(incomplete_error)
+        self.assertEqual(
+            [slot["empty"] for slot in args._scene_vocab_strategy_slots],
+            [False, False, True],
+        )
+
+        empty_strategy_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": [],
+                    "weather_atmosphere": [],
+                    "texture_material": [],
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=(empty_strategy_answer, None),
+        ):
+            empty_words, _, _, empty_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=2,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertEqual(empty_words, [])
+        self.assertIsNone(empty_error)
+        self.assertEqual(
+            [slot["empty"] for slot in args._scene_vocab_strategy_slots],
+            [True, True, True],
+        )
+
+        too_many_strategy_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": [
+                        "move into a forest",
+                        "move into a warehouse",
+                    ],
+                    "weather_atmosphere": ["add soft rain"],
+                    "texture_material": ["coated in brushed metal"],
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=(too_many_strategy_answer, None),
+        ):
+            too_many_words, _, _, too_many_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=3,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertEqual(
+            too_many_words,
+            [
+                "move into a forest",
+                "add soft rain",
+                "coated in brushed metal",
+            ],
+        )
+        self.assertIsNone(too_many_error)
+
+        unknown_group_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": ["move into a forest"],
+                    "weather_atmosphere": ["add soft rain"],
+                    "texture_material": ["coated in brushed metal"],
+                    "strategies": ["not a real strategy"],
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=(unknown_group_answer, None),
+        ):
+            unknown_words, _, _, unknown_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=4,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertEqual(unknown_words, wrapped_words)
+        self.assertIsNone(unknown_error)
+
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=('{"natural": true, "feedback": ""}', None),
+        ) as query:
+            evaluate_attack_success_naturalness(
+                image_path=Path("comparison.png"),
+                candidate_prompt="ignored",
+                args=args,
+                is_source_vs_edited_comparison=True,
+            )
+
+        verifier_call = query.call_args.kwargs
+        self.assertEqual(verifier_call["vlm_backend"], "qwen")
+        self.assertEqual(
+            verifier_call["vlm_model_id"],
+            QWEN3_VL_4B_INSTRUCT_MODEL_ID,
+        )
+        self.assertFalse(verifier_call["enable_thinking"])
+        self.assertFalse(verifier_call["do_sample"])
+
+    def test_internvl3_5_mode_matches_naturalness_verifier(self) -> None:
+        resolved = resolve_strategy_mllm_runtime(
+            mode="OpenGVLab/InternVL3_5-4B",
+            configured_backend="gemma4",
+            configured_model_id="google/gemma-4-E4B-it",
+            configured_thinking=True,
+            configured_do_sample=True,
+        )
+        self.assertEqual(
+            resolved,
+            (
+                "internvl3_5_4b",
+                "internvl",
+                INTERNVL3_5_4B_MODEL_ID,
+                False,
+                True,
+            ),
+        )
+        instruct_resolved = resolve_strategy_mllm_runtime(
+            mode="OpenGVLab/InternVL3_5-4B-Instruct",
+            configured_backend="gemma4",
+            configured_model_id="google/gemma-4-E4B-it",
+            configured_thinking=True,
+            configured_do_sample=True,
+        )
+        self.assertEqual(
+            instruct_resolved,
+            (
+                "internvl3_5_4b_instruct",
+                "internvl",
+                INTERNVL3_5_4B_INSTRUCT_MODEL_ID,
+                False,
+                True,
+            ),
+        )
+
+        args = SimpleNamespace(
+            strategy_mllm_mode="internvl3_5_4b_instruct",
+            class_ablation=False,
+            class_name="goldfish",
+            classifier_name="resnet50",
+            model_path="black-forest-labs/FLUX.2-klein-9b-kv",
+            bernini_edit_prompt_mode=False,
+            qwen_edit_prompt_mode=False,
+            qwen_strategy_and_enable=False,
+            gcg_occurrence=0,
+            gcg_scene_vocab_topic=None,
+            gcg_scene_vocab_size=3,
+            gcg_scene_vocab_prompts_per_strategy=1,
+            gcg_scene_vocab_enabled_strategies="all",
+            gcg_slot_candidate_max_words=5,
+            gcg_scene_vocab_feedback=False,
+            gcg_scene_feedback_limit=1000,
+            cwor_enable=True,
+            gcg_scene_llm_backend="gemma4",
+            gcg_scene_llm_model_id="google/gemma-4-E4B-it",
+            gcg_scene_llm_device="cpu",
+            gcg_scene_llm_max_new_tokens=128,
+            gcg_scene_llm_thinking=True,
+            gcg_scene_llm_do_sample=True,
+            gcg_eval_naturalness_llm_thinking=True,
+        )
+        strategy_answer = json.dumps(
+            {
+                "strategies": {
+                    "background_shift": ["move into a forest"],
+                    "weather_atmosphere": ["add soft rain"],
+                    "texture_material": ["coated in brushed metal"],
+                }
+            }
+        )
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=(strategy_answer, None),
+        ) as strategy_query:
+            words, _, _, strategy_error = generate_scene_vocab_words(
+                args=args,
+                step_idx=0,
+                current_prompt="a photo of goldfish in the background",
+                current_word="background",
+                slot_kind="scene",
+                best_objective=0.0,
+                previous_feedback=[],
+                reference_image_path=Path("unused-reference.png"),
+                fallback_word="outdoor",
+            )
+
+        self.assertIsNone(strategy_error)
+        self.assertEqual(
+            words,
+            [
+                "move into a forest",
+                "add soft rain",
+                "coated in brushed metal",
+            ],
+        )
+        self.assertEqual(
+            strategy_query.call_args.kwargs["vlm_backend"],
+            "internvl",
+        )
+        self.assertEqual(
+            strategy_query.call_args.kwargs["vlm_model_id"],
+            INTERNVL3_5_4B_INSTRUCT_MODEL_ID,
+        )
+
+        with patch(
+            "vlm_attack.query_vlm_text",
+            return_value=('{"natural": true, "feedback": ""}', None),
+        ) as query:
+            evaluate_attack_success_naturalness(
+                image_path=Path("comparison.png"),
+                candidate_prompt="ignored",
+                args=args,
+                is_source_vs_edited_comparison=True,
+            )
+
+        verifier_call = query.call_args.kwargs
+        self.assertEqual(verifier_call["vlm_backend"], "internvl")
+        self.assertEqual(
+            verifier_call["vlm_model_id"],
+            INTERNVL3_5_4B_INSTRUCT_MODEL_ID,
+        )
+        self.assertFalse(verifier_call["enable_thinking"])
+        self.assertFalse(verifier_call["do_sample"])
+
+    def test_internvl_uses_official_custom_chat_runtime(self) -> None:
+        class FakePreTrainedModel:
+            pass
+
+        raw_model = Mock()
+        raw_model.eval.return_value = raw_model
+        raw_model.to.return_value = raw_model
+        tokenizer = object()
+        fake_auto_model = Mock()
+        fake_auto_model.from_pretrained.side_effect = (
+            lambda *args, **kwargs: (
+                self.assertEqual(
+                    FakePreTrainedModel.all_tied_weights_keys,
+                    {},
+                )
+                or raw_model
+            )
+        )
+        fake_auto_tokenizer = Mock()
+        fake_auto_tokenizer.from_pretrained.return_value = tokenizer
+        fake_transformers = ModuleType("transformers")
+        fake_transformers.AutoModel = fake_auto_model
+        fake_transformers.AutoTokenizer = fake_auto_tokenizer
+        fake_modeling_utils = ModuleType("transformers.modeling_utils")
+        fake_modeling_utils.PreTrainedModel = FakePreTrainedModel
+
+        with patch.dict(
+            sys.modules,
+            {
+                "transformers": fake_transformers,
+                "transformers.modeling_utils": fake_modeling_utils,
+            },
+        ):
+            model, processor, ask_fn, uses_pipeline = load_vlm_runtime(
+                backend="internvl",
+                model_id=INTERNVL3_5_4B_MODEL_ID,
+                vlm_dtype=torch.float32,
+                vlm_device=torch.device("cpu"),
+                allow_blip=True,
+            )
+
+        self.assertIsInstance(model, _InternVLChatRuntime)
+        self.assertIs(model.model, raw_model)
+        self.assertIs(model.tokenizer, tokenizer)
+        self.assertIsNone(processor)
+        self.assertIs(ask_fn, _ask_with_internvl_chat)
+        self.assertTrue(uses_pipeline)
+        self.assertFalse(
+            hasattr(FakePreTrainedModel, "all_tied_weights_keys")
+        )
+        model_call = fake_auto_model.from_pretrained.call_args
+        self.assertEqual(
+            model_call.args,
+            (INTERNVL3_5_4B_MODEL_ID,),
+        )
+        self.assertTrue(model_call.kwargs["trust_remote_code"])
+        self.assertTrue(model_call.kwargs["low_cpu_mem_usage"])
+        self.assertIs(model_call.kwargs["dtype"], torch.float32)
+        raw_model.eval.assert_called_once_with()
+        raw_model.to.assert_called_once_with(torch.device("cpu"))
+        fake_auto_tokenizer.from_pretrained.assert_called_once_with(
+            INTERNVL3_5_4B_MODEL_ID,
+            trust_remote_code=True,
+            use_fast=False,
+        )
+
+    def test_internvl_custom_chat_uses_official_image_prompt_contract(self) -> None:
+        raw_model = Mock()
+        raw_model.chat.return_value = '{"natural": true, "feedback": ""}'
+        tokenizer = object()
+        runtime = _InternVLChatRuntime(
+            model=raw_model,
+            tokenizer=tokenizer,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        pixels = torch.ones((1, 3, 448, 448), dtype=torch.float32)
+
+        with patch(
+            "vlm_runtime._prepare_internvl_pixel_values",
+            return_value=pixels,
+        ) as prepare:
+            answer = _ask_with_internvl_chat(
+                image=Image.new("RGB", (32, 24)),
+                question="Return JSON.",
+                model=runtime,
+                processor=None,
+                device=torch.device("cpu"),
+                max_new_tokens=64,
+                enable_thinking=False,
+                do_sample=False,
+            )
+
+        self.assertEqual(answer, '{"natural": true, "feedback": ""}')
+        prepare.assert_called_once()
+        raw_model.chat.assert_called_once_with(
+            tokenizer,
+            pixels,
+            "<image>\nReturn JSON.",
+            {"max_new_tokens": 64, "do_sample": False},
+        )
+
+    def test_qwen3_vl_pipeline_uses_multimodal_chat_messages(self) -> None:
+        fake_pipeline = Mock(
+            return_value=[
+                {
+                    "generated_text": [
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "answer"}],
+                        }
+                    ]
+                }
+            ]
+        )
+        image = Image.new("RGB", (4, 4), "white")
+
+        answer = _ask_with_qwen_pipeline(
+            image=image,
+            question="question",
+            model=fake_pipeline,
+            processor=None,
+            device=torch.device("cpu"),
+            max_new_tokens=32,
+            enable_thinking=False,
+            do_sample=True,
+        )
+
+        self.assertEqual(answer, "answer")
+        call = fake_pipeline.call_args
+        self.assertEqual(
+            call.kwargs["generate_kwargs"],
+            {"max_new_tokens": 32, "do_sample": True},
+        )
+        self.assertNotIn("enable_thinking", call.kwargs)
+        messages = call.kwargs["text"]
+        self.assertIs(messages[0]["content"][0]["image"], image)
+        self.assertEqual(messages[0]["content"][1]["text"], "question")
 
     def test_clean_correct_filter_option_defaults_off_and_parses(self) -> None:
         default_args = build_runner_parser().parse_args([])
@@ -1193,6 +2146,37 @@ class AttackModeRefactorTests(unittest.TestCase):
         comparable_ablation.pop("class_ablation")
         self.assertEqual(comparable_ablation, baseline["run_args"])
 
+    def test_adv_res_and_siglip2_clean100_configs_share_required_rules(self) -> None:
+        config_root = Path(__file__).resolve().parents[1] / "configs"
+        expected_victims = {
+            "flux2_and_attack_nips_adv_res.yaml": "adv_res",
+            "flux2_and_attack_nips_siglip2.yaml": "siglip2",
+        }
+        for config_name, expected_victim in expected_victims.items():
+            with self.subTest(config=config_name):
+                payload = yaml.safe_load(
+                    (config_root / config_name).read_text(encoding="utf-8")
+                )
+                args = payload["run_args"]
+                self.assertEqual(args["victim_model"], expected_victim)
+                self.assertEqual(
+                    args["gcg_scene_vocab_enabled_strategies"],
+                    "all",
+                )
+                self.assertIs(args["gcg_scene_llm_do_sample"], True)
+                self.assertIs(
+                    args["gcg_eval_naturalness_on_attack_success"],
+                    True,
+                )
+                self.assertIs(
+                    args["gcg_eval_naturalness_llm_thinking"],
+                    False,
+                )
+                self.assertIs(args["attack_only_clean_correct"], True)
+                self.assertEqual(args["clean_correct_sample_size"], 100)
+                self.assertEqual(args["clean_correct_sample_seed"], 0)
+                self.assertEqual(args["manual_seed"], 0)
+
     def test_class_ablation_neutralizes_all_supported_placeholders(self) -> None:
         markers = (
             "<class>",
@@ -1242,6 +2226,10 @@ class AttackModeRefactorTests(unittest.TestCase):
         infer_class.assert_called_once()
         self.assertEqual(resolved, "a photo of goldfish in the background")
         self.assertEqual(args.class_name, "goldfish")
+
+    def test_repository_categories_csv_supports_non_torchvision_victims(self) -> None:
+        self.assertEqual(infer_imagenet_class_name("adv_res", 0), "tench")
+        self.assertEqual(infer_imagenet_class_name("siglip2", 1), "goldfish")
 
     def test_class_ablation_removes_explicit_class_text_from_llm_prompt(self) -> None:
         raw_answer = json.dumps(
@@ -1341,6 +2329,167 @@ class AttackModeRefactorTests(unittest.TestCase):
 
         self.assertIn("resolve_optional_hf_token(cfg.hf_token)", source)
         self.assertNotIn("resolve_hf_token(cfg.hf_token)", source)
+
+    def test_flux2_runner_resumes_only_matching_verified_report(self) -> None:
+        cfg = SimpleNamespace(
+            attack_mode="and",
+            strategy_mllm_mode="qwen3_vl_4b_instruct",
+            gcg_scene_vocab_enabled_strategies="all",
+            gcg_scene_vocab_prompts_per_strategy=1,
+            gcg_scene_llm_do_sample=True,
+            gcg_eval_naturalness_on_attack_success=True,
+            gcg_eval_naturalness_llm_thinking=False,
+            scene_vlm_do_sample=False,
+            manual_seed=0,
+        )
+        payload = {
+            "final_attack_success": True,
+            "args": {
+                "attack_mode": "and",
+                "strategy_mllm_mode": "qwen3_vl_4b_instruct",
+                "gcg_scene_vocab_enabled_strategies": "all",
+                "gcg_scene_vocab_prompts_per_strategy": 1,
+                "gcg_scene_llm_do_sample": True,
+                "gcg_eval_naturalness_on_attack_success": True,
+                "gcg_eval_naturalness_llm_thinking": False,
+                "seed": 0,
+            },
+            "strategy_generator": {
+                "mode": "qwen3_vl_4b_instruct",
+                "do_sample": True,
+            },
+            "naturalness_verifier": {
+                "enabled": True,
+                "mode": "qwen3_vl_4b_instruct",
+                "do_sample": False,
+            },
+            "history": [
+                {
+                    "raw_vlm_answer": "{}",
+                    "strategy_query_accounting_version": 3,
+                    "strategy_slot_count": 3,
+                    "strategy_duplicate_skipped_count": 1,
+                    "strategy_duplicate_query_count": 1,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.json"
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            resumed = load_resumable_report(
+                report_path,
+                cfg=cfg,
+                sample_index=7,
+                image_id="image",
+                true_label=1,
+                target_label=2,
+                sample_dir=Path(tmpdir),
+            )
+            self.assertIsNotNone(resumed)
+            self.assertEqual(resumed["sample_index"], 7)
+            self.assertTrue(resumed["resumed_from_existing_report"])
+
+            payload["args"]["seed"] = 1
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertIsNone(
+                load_resumable_report(
+                    report_path,
+                    cfg=cfg,
+                    sample_index=7,
+                    image_id="image",
+                    true_label=1,
+                    target_label=2,
+                    sample_dir=Path(tmpdir),
+                )
+            )
+
+    def test_flux2_runner_resumes_none_strategy_report_with_zero_slots(self) -> None:
+        cfg = SimpleNamespace(
+            attack_mode="vlm",
+            strategy_mllm_mode="internvl3_5_4b_instruct",
+            gcg_scene_vocab_enabled_strategies="none",
+            gcg_scene_vocab_prompts_per_strategy=0,
+            gcg_scene_llm_do_sample=False,
+            gcg_eval_naturalness_on_attack_success=True,
+            gcg_eval_naturalness_llm_thinking=False,
+            scene_vlm_do_sample=False,
+            manual_seed=0,
+        )
+        payload = {
+            "final_attack_success": False,
+            "args": {
+                "attack_mode": "vlm",
+                "strategy_mllm_mode": "internvl3_5_4b_instruct",
+                "gcg_scene_vocab_enabled_strategies": "none",
+                "gcg_scene_vocab_prompts_per_strategy": 0,
+                "gcg_scene_llm_do_sample": False,
+                "gcg_eval_naturalness_on_attack_success": True,
+                "gcg_eval_naturalness_llm_thinking": False,
+                "seed": 0,
+            },
+            "strategy_generator": {
+                "mode": "internvl3_5_4b_instruct",
+                "do_sample": False,
+            },
+            "naturalness_verifier": {
+                "enabled": True,
+                "mode": "internvl3_5_4b_instruct",
+                "do_sample": False,
+            },
+            "history": [
+                {
+                    "raw_vlm_answer": "{}",
+                    "strategy_query_accounting_version": 3,
+                    "strategy_slot_count": 0,
+                    "strategy_duplicate_skipped_count": 0,
+                    "strategy_duplicate_query_count": 0,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.json"
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            resumed = load_resumable_report(
+                report_path,
+                cfg=cfg,
+                sample_index=0,
+                image_id="image",
+                true_label=1,
+                target_label=2,
+                sample_dir=Path(tmpdir),
+            )
+            self.assertIsNotNone(resumed)
+            self.assertTrue(resumed["resumed_from_existing_report"])
+
+    def test_flux2_resume_config_reads_core_only_sampling_args(self) -> None:
+        cfg = SimpleNamespace(
+            attack_mode="and",
+            strategy_mllm_mode="qwen3_vl_4b_instruct",
+            gcg_scene_vocab_enabled_strategies="all",
+            gcg_scene_vocab_prompts_per_strategy=1,
+            manual_seed=2,
+            model_path="black-forest-labs/FLUX.2-klein-9b-kv",
+        )
+        resume_cfg = build_resume_validation_config(
+            cfg,
+            [
+                "--gcg_scene_llm_do_sample",
+                "true",
+                "--scene_vlm_do_sample",
+                "false",
+                "--gcg_eval_naturalness_on_attack_success",
+                "true",
+                "--gcg_eval_naturalness_llm_thinking",
+                "false",
+            ],
+        )
+        self.assertTrue(resume_cfg.gcg_scene_llm_do_sample)
+        self.assertFalse(resume_cfg.scene_vlm_do_sample)
+        self.assertTrue(
+            resume_cfg.gcg_eval_naturalness_on_attack_success
+        )
+        self.assertFalse(resume_cfg.gcg_eval_naturalness_llm_thinking)
+        self.assertEqual(resume_cfg.manual_seed, 2)
 
     def test_flux2_pipeline_only_passes_nonempty_hf_token(self) -> None:
         captured_load_kwargs = []
@@ -1985,7 +3134,7 @@ class AttackModeRefactorTests(unittest.TestCase):
             "bernini_and_attack_nips*.yaml",
         )
         paths = sorted({path for pattern in patterns for path in config_root.glob(pattern)})
-        self.assertEqual(len(paths), 33)
+        self.assertEqual(len(paths), 34)
 
         forbidden_exact = {
             "inversion_prompt",
@@ -2086,6 +3235,41 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertEqual(records[1]["clean_pred_idx"], 1)
         self.assertIn("missing_source_image", records[2]["error"])
         self.assertEqual(victim.f_model.batch_sizes, [2])
+
+    def test_clean_correct_seeded_sampling_is_exact_and_deterministic(self) -> None:
+        population = set(range(250))
+
+        seed0_first = sample_clean_correct_indices(
+            population,
+            sample_size=100,
+            seed=0,
+        )
+        seed0_second = sample_clean_correct_indices(
+            population,
+            sample_size=100,
+            seed=0,
+        )
+        seed1 = sample_clean_correct_indices(
+            population,
+            sample_size=100,
+            seed=1,
+        )
+
+        self.assertEqual(len(seed0_first), 100)
+        self.assertEqual(seed0_first, seed0_second)
+        self.assertNotEqual(seed0_first, seed1)
+        self.assertTrue(seed0_first <= population)
+
+    def test_clean_correct_seeded_sampling_rejects_an_undersized_pool(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "requested=100 available=99",
+        ):
+            sample_clean_correct_indices(
+                set(range(99)),
+                sample_size=100,
+                seed=0,
+            )
 
     def test_runners_do_not_eagerly_load_dataset_images(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -2207,6 +3391,144 @@ class AttackModeRefactorTests(unittest.TestCase):
         )
         self.assertFalse(args.gcg_scene_vocab_feedback)
         self.assertEqual(unknown, [])
+
+    def test_prepared_queue_enforces_query_accounting_v3(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        queue_dir = (
+            project_root
+            / ".aris"
+            / "queues"
+            / "pro6000_flux2_mllm_dosample_seed012_clean100_20260731_151453"
+        )
+        queue_text = (queue_dir / "queue.sh").read_text(encoding="utf-8")
+        verifier_text = (queue_dir / "verify_job.py").read_text(
+            encoding="utf-8"
+        )
+        manifest = json.loads(
+            (queue_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+
+        self.assertNotIn("legacy_current_prompt_filtered", queue_text)
+        self.assertNotIn("legacy_current_prompt_filtered", verifier_text)
+        self.assertIn(
+            "strategy_query_accounting_version",
+            verifier_text,
+        )
+        self.assertIn(
+            "duplicate_query_count != duplicate_count",
+            verifier_text,
+        )
+        self.assertIn(
+            "strategy_duplicate_query_count",
+            verifier_text,
+        )
+        completion_contract = manifest["completion_contract"]
+        self.assertEqual(
+            completion_contract["strategy_query_accounting_version"],
+            3,
+        )
+        self.assertIn(
+            "consume exactly one",
+            completion_contract["duplicate_candidate_policy"],
+        )
+        self.assertIn(
+            "consume zero",
+            completion_contract["empty_candidate_policy"],
+        )
+        self.assertNotIn("wave2", queue_text.lower())
+        self.assertIn(
+            '[[ ! -e "$run_root" && ! -e "$attempt_record" ]] && break',
+            queue_text,
+        )
+        self.assertIn(
+            'attempt_cohort_file="$run_root/cohort_100_indices.json"',
+            queue_text,
+        )
+        self.assertIn(
+            'cp -- "$COHORT_FILE" "$attempt_cohort_file"',
+            queue_text,
+        )
+        self.assertIn(
+            '--sample_indices_file "$attempt_cohort_file"',
+            queue_text,
+        )
+        self.assertIn("--resume_existing_reports true", queue_text)
+        self.assertIn(
+            "resume partial attempt without rerunning verified reports",
+            queue_text,
+        )
+
+    def test_revised_seed01_queues_cover_exact_eight_cells(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        completed_queue_dir = (
+            project_root
+            / ".aris"
+            / "queues"
+            / "pro6000_flux2_mllm_dosample_seed012_clean100_20260731_151453"
+        )
+        followup_queue_dir = (
+            project_root
+            / ".aris"
+            / "queues"
+            / "pro6000_flux2_mllm_modes_seed01_followup_20260731_191906"
+        )
+        completed_manifest = json.loads(
+            (completed_queue_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        followup_manifest = json.loads(
+            (followup_queue_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        completed_queue_text = (completed_queue_dir / "queue.sh").read_text(
+            encoding="utf-8"
+        )
+        followup_queue_text = (followup_queue_dir / "queue.sh").read_text(
+            encoding="utf-8"
+        )
+
+        completed_jobs = completed_manifest["jobs"]
+        self.assertEqual(
+            [(job["mode"], job["seed"]) for job in completed_jobs],
+            [
+                ("qwen3_vl_4b_instruct", 0),
+                ("qwen3_vl_4b_instruct", 1),
+            ],
+        )
+        self.assertIn("seed 2", completed_manifest["experiment"]["scope_revision"])
+        self.assertNotIn("seed2", completed_queue_text)
+
+        followup_jobs = followup_manifest["jobs"]
+        self.assertEqual(len(followup_jobs), 6)
+        self.assertEqual(
+            [
+                (
+                    job["mode"],
+                    job["attack_mode"],
+                    job["strategies"],
+                    job["strategy_do_sample"],
+                    job["seed"],
+                )
+                for job in followup_jobs
+            ],
+            [
+                ("qwen3_vl_4b_instruct", "vlm", "none", False, 0),
+                ("qwen3_vl_4b_instruct", "vlm", "none", False, 1),
+                ("internvl3_5_4b_instruct", "vlm", "none", False, 0),
+                ("internvl3_5_4b_instruct", "vlm", "none", False, 1),
+                ("internvl3_5_4b_instruct", "and", "all", True, 0),
+                ("internvl3_5_4b_instruct", "and", "all", True, 1),
+            ],
+        )
+        self.assertEqual(
+            followup_manifest["common"]["query_accounting_version"],
+            3,
+        )
+        self.assertNotIn("wave2", followup_queue_text.lower())
+        self.assertNotIn("seed2", followup_queue_text)
+        self.assertIn('JOB_ATTACK_MODES=(vlm vlm vlm vlm and and)', followup_queue_text)
+        self.assertIn('JOB_STRATEGIES=(none none none none all all)', followup_queue_text)
+        self.assertIn('--scene_vlm_do_sample false', followup_queue_text)
+        self.assertIn('--manual_seed "$seed"', followup_queue_text)
+        self.assertIn('--sample_indices_file "$attempt_cohort_file"', followup_queue_text)
 
 
 class AttackImageSavingTests(unittest.TestCase):
@@ -2582,6 +3904,8 @@ class AttackImageSavingTests(unittest.TestCase):
                     "0",
                     "--gcg_candidate_source",
                     "vlm_query",
+                    "--gcg_eval_naturalness_on_attack_success",
+                    "false",
                     "--gcg_early_stop_on_attack_success",
                     "1",
                     "--saved_image_size",
@@ -2677,6 +4001,7 @@ class AttackImageSavingTests(unittest.TestCase):
                     "--gcg_batch_size", "1",
                     "--max_victim_queries", "2",
                     "--classifier_label", "0",
+                    "--gcg_eval_naturalness_on_attack_success", "false",
                     "--device", "cpu",
                 ]
             )
@@ -2908,6 +4233,7 @@ class AttackImageSavingTests(unittest.TestCase):
                     "--max_victim_queries", "4",
                     "--classifier_label", "0",
                     "--classifier_objective", "ce_max",
+                    "--gcg_eval_naturalness_on_attack_success", "false",
                     "--gcg_early_stop_on_attack_success", "true",
                     "--device", "cpu",
                 ]
@@ -3083,6 +4409,7 @@ class AttackImageSavingTests(unittest.TestCase):
                     "--gcg_batch_size", "1",
                     "--max_victim_queries", "2",
                     "--classifier_label", "0",
+                    "--gcg_eval_naturalness_on_attack_success", "false",
                     "--gcg_early_stop_on_attack_success", "true",
                     "--device", "cpu",
                 ]

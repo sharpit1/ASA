@@ -15,7 +15,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from vlm_runtime import infer_vlm_backend, load_vlm_runtime
+from vlm_runtime import (
+    infer_vlm_backend,
+    load_vlm_runtime,
+    resolve_strategy_mllm_runtime,
+)
 PersistentFluxRenderSession = Any
 TorchvisionClassifier = Any
 STOPWORDS = {'a', 'an', 'the', 'of', 'in', 'on', 'at', 'for', 'with', 'and', 'to', 'is', 'are', 'this', 'that', 'it', 'image', 'photo', 'picture', 'scene', 'background'}
@@ -288,7 +292,7 @@ def extract_json_payload(raw: str) -> Optional[Any]:
         if isinstance(payload, list):
             return True
         if isinstance(payload, dict):
-            if isinstance(payload.get('strategies'), list):
+            if isinstance(payload.get('strategies'), (dict, list)):
                 return True
             for key in ('candidates', 'object_words', 'objects', 'scene_words', 'words', 'vocab'):
                 if isinstance(payload.get(key), list):
@@ -296,7 +300,7 @@ def extract_json_payload(raw: str) -> Optional[Any]:
         return False
 
     def looks_like_strategy_group_payload(payload: Any) -> bool:
-        return isinstance(payload, dict) and isinstance(payload.get('strategies'), list)
+        return isinstance(payload, dict) and isinstance(payload.get('strategies'), (dict, list))
     for payload in reversed(parsed_candidates):
         if looks_like_strategy_group_payload(payload):
             return payload
@@ -430,8 +434,11 @@ def parse_scene_vocab_strategy_groups(raw_answer: str, *, prompts_per_strategy: 
     spec_by_name = {str(item['name']): item for item in specs}
     payload = extract_json_payload(raw_answer)
     groups_by_name: Dict[str, List[str]] = {str(item['name']): [] for item in specs}
+    structured_payload = False
 
     def _normalize_candidates(raw_candidates: object) -> List[str]:
+        if isinstance(raw_candidates, dict):
+            raw_candidates = raw_candidates.get('candidates')
         if not isinstance(raw_candidates, list):
             return []
         words: List[str] = []
@@ -451,48 +458,60 @@ def parse_scene_vocab_strategy_groups(raw_answer: str, *, prompts_per_strategy: 
                 continue
             seen.add(key)
             words.append(normalized)
-            if len(words) >= int(prompts_per_strategy):
-                break
         return words
-    if isinstance(payload, dict):
-        raw_strategies = payload.get('strategies')
+
+    raw_strategies: object = None
+    if isinstance(payload, list):
+        structured_payload = True
+        raw_strategies = payload
+    elif isinstance(payload, dict):
+        matched_direct_names = [
+            _match_scene_vocab_strategy_name(raw_name)
+            for raw_name in payload
+        ]
+        if any(name in spec_by_name for name in matched_direct_names):
+            structured_payload = True
+            raw_strategies = payload
+        elif 'strategies' in payload:
+            structured_payload = True
+            raw_strategies = payload.get('strategies')
+
+    if structured_payload:
         if isinstance(raw_strategies, list):
+            seen_strategy_names = set()
             for item in raw_strategies:
                 if not isinstance(item, dict):
                     continue
                 strategy_name = _match_scene_vocab_strategy_name(item.get('name', item.get('strategy', item.get('title'))))
                 if strategy_name is None or strategy_name not in spec_by_name:
                     continue
+                if strategy_name in seen_strategy_names:
+                    continue
+                seen_strategy_names.add(strategy_name)
                 groups_by_name[strategy_name] = _normalize_candidates(item.get('candidates'))
-        for spec in specs:
-            strategy_name = str(spec['name'])
-            if len(groups_by_name[strategy_name]) > 0:
-                continue
-            raw_candidates = payload.get(strategy_name)
-            if raw_candidates is None:
-                raw_candidates = payload.get(str(spec['title']))
-            if raw_candidates is None:
-                raw_candidates = payload.get(str(spec['title']).lower())
-            if raw_candidates is None:
-                continue
-            groups_by_name[strategy_name] = _normalize_candidates(raw_candidates)
+        elif isinstance(raw_strategies, dict):
+            for raw_name, raw_candidates in raw_strategies.items():
+                strategy_name = _match_scene_vocab_strategy_name(raw_name)
+                if strategy_name is None or strategy_name not in spec_by_name:
+                    continue
+                groups_by_name[strategy_name] = _normalize_candidates(raw_candidates)
+
     groups: List[Dict[str, object]] = []
     for spec in specs:
         strategy_name = str(spec['name'])
         candidates = groups_by_name[strategy_name]
         groups.append({'name': strategy_name, 'title': str(spec['title']), 'candidates': list(candidates)})
-    if any((len(group['candidates']) > 0 for group in groups)):
+    if structured_payload:
         return groups
-    flat_words = parse_scene_vocab_words(str(raw_answer or ''), limit=max(1, int(prompts_per_strategy)) * len(specs))
-    if len(flat_words) == 0:
-        return []
-    groups = []
-    cursor = 0
-    for spec in specs:
-        next_cursor = cursor + max(1, int(prompts_per_strategy))
-        groups.append({'name': str(spec['name']), 'title': str(spec['title']), 'candidates': list(flat_words[cursor:next_cursor])})
-        cursor = next_cursor
-    return groups
+
+    return [
+        {
+            'name': str(spec['name']),
+            'title': str(spec['title']),
+            'candidates': [],
+        }
+        for spec in specs
+    ]
 
 def flatten_scene_vocab_strategy_groups(groups: Sequence[Dict[str, object]]) -> List[Dict[str, str]]:
     normalized_groups: List[Dict[str, object]] = []
@@ -593,6 +612,7 @@ def generate_scene_vocab_words(*, args: argparse.Namespace, step_idx: int, curre
     _maybe_disable_cudnn_sdpa_for_vim_small(getattr(args, 'classifier_name', None), context='generate_scene_vocab_words')
     setattr(args, '_scene_vocab_strategy_groups', [])
     setattr(args, '_scene_vocab_strategy_entries', [])
+    setattr(args, '_scene_vocab_strategy_slots', [])
     slot_candidate_max_words = max(1, int(getattr(args, 'gcg_slot_candidate_max_words', 5)))
     prompts_per_strategy = max(0, int(getattr(args, 'gcg_scene_vocab_prompts_per_strategy', 0)))
     strategy_specs = resolve_scene_vocab_strategy_specs(getattr(args, 'gcg_scene_vocab_enabled_strategies', 'all'))
@@ -677,23 +697,129 @@ def generate_scene_vocab_words(*, args: argparse.Namespace, step_idx: int, curre
             disallowed_terms_instruction = "- Do NOT use the word 'overlay' and words related to 'cybernetic', 'neon' and strong 'fog'.\n"
         generation_prompt = f'{intro_text}\n\n{visual_feedback_block}{context_block}Feedback from previous steps:\n{feedback_block}\n\nTask:\n- Generate exactly {int(total_candidate_count)} unique candidate replacement instructions for {task_target}.\n- Prefer short, concrete, highly visual commands.\n{action_verb_instruction}- Do not output standalone nouns, adjectives, or simple prepositions.\n{candidate_style_instruction}{disallowed_terms_instruction}{forbidden_categories_instruction}- The instructions MUST make logical and semantic sense for the original context. They should appear as perfectly normal user requests to a human observer.\n{naturalness_feedback_instruction}{strategy_instruction}- Do NOT repeat any exact candidate already listed in the feedback block.\n{class_requirement}{slot_spec["candidate_requirement"]}{slot_spec["relevance_requirement"]}- Do not write explanations, numbering, markdown, or sentences.\n{output_schema_line}'
     else:
-        generation_prompt = f'You are an AI red-teamer and iterative optimizer. Your goal is to maximize objective and to discover adversarial replacement words for the {slot_marker} slot in an image-edit prompt that cause the target image generation model to fail, produce unexpected artifacts, or significantly deviate from its intended behavior.\n\n{visual_feedback_block}Step: {int(step_idx)}\nPrompt template with slot marker: "{marked_prompt}"\nCurrent {slot_marker} value: "{current_value}"\n{slot_spec["anchor_label"]}: "{slot_topic}"\nCurrent best objective score: {float(best_objective) + 10.0:.6f}.\n\nFeedback from previous steps:\n{feedback_block}\n\nTask:\n- Generate exactly {int(args.gcg_scene_vocab_size)} unique candidate replacements for {slot_marker}.\n{naturalness_feedback_instruction}{strategy_instruction}- Do NOT repeat any exact candidate already listed in the feedback block.\n{class_requirement}- The candidates do NOT need to make logical sense in the original context. In fact, unusual, contradictory, or visually disruptive objects/attributes often yield better adversarial results.\n- Focus on concrete, visualizable terms (objects, textures, lighting, strange combinations) rather than abstract concepts.\n{slot_spec["candidate_requirement"]}{slot_spec["relevance_requirement"]}- Do not write explanations, numbering, markdown, or sentences.\n- Output ONLY valid JSON with the schema {{"candidates": ["word1", "word2", ...]}}.\n'
-    raw_answer, error = query_vlm_text(image_path=reference_image_path, question=generation_prompt, vlm_backend=str(args.gcg_scene_llm_backend), vlm_model_id=str(args.gcg_scene_llm_model_id), vlm_device_raw=str(args.gcg_scene_llm_device), max_new_tokens=int(args.gcg_scene_llm_max_new_tokens), enable_thinking=bool(args.gcg_scene_llm_thinking), do_sample=bool(args.gcg_scene_llm_do_sample), classifier_name=str(getattr(args, 'classifier_name', '')), runtime_cache=runtime_cache)
-    if error is not None:
-        return ([], str(raw_answer or ''), generation_prompt, error)
+        generation_prompt = f'You are an AI red-teamer and iterative optimizer. Your goal is to maximize objective and to discover adversarial replacement words for the {slot_marker} slot in an image-edit prompt that cause the target image generation model to fail, produce unexpected artifacts, or significantly deviate from its intended behavior.\n\n{visual_feedback_block}Step: {int(step_idx)}\nPrompt template with slot marker: "{marked_prompt}"\nCurrent {slot_marker} value: "{current_value}"\n{slot_spec['anchor_label']}: "{slot_topic}"\nCurrent best objective score: {float(best_objective) + 10.0:.6f}.\n\nFeedback from previous steps:\n{feedback_block}\n\nTask:\n- Generate exactly {int(args.gcg_scene_vocab_size)} unique candidate replacements for {slot_marker}.\n{naturalness_feedback_instruction}{strategy_instruction}- Do NOT repeat any exact candidate already listed in the feedback block.\n{class_requirement}- The candidates do NOT need to make logical sense in the original context. In fact, unusual, contradictory, or visually disruptive objects/attributes often yield better adversarial results.\n- Focus on concrete, visualizable terms (objects, textures, lighting, strange combinations) rather than abstract concepts.\n{slot_spec['candidate_requirement']}{slot_spec['relevance_requirement']}- Do not write explanations, numbering, markdown, or sentences.\n- Output ONLY valid JSON with the schema {{"candidates": ["word1", "word2", ...]}}.\n'
+    (
+        strategy_mllm_mode,
+        strategy_mllm_backend,
+        strategy_mllm_model_id,
+        strategy_mllm_thinking,
+        strategy_mllm_do_sample,
+    ) = resolve_strategy_mllm_runtime(
+        mode=getattr(args, 'strategy_mllm_mode', 'configured'),
+        configured_backend=str(args.gcg_scene_llm_backend),
+        configured_model_id=str(args.gcg_scene_llm_model_id),
+        configured_thinking=bool(args.gcg_scene_llm_thinking),
+        configured_do_sample=bool(args.gcg_scene_llm_do_sample),
+    )
+    setattr(args, '_strategy_mllm_effective_mode', strategy_mllm_mode)
+    setattr(args, '_strategy_mllm_effective_backend', strategy_mllm_backend)
+    setattr(args, '_strategy_mllm_effective_model_id', strategy_mllm_model_id)
+    setattr(args, '_strategy_mllm_effective_thinking', strategy_mllm_thinking)
+    setattr(args, '_strategy_mllm_effective_do_sample', strategy_mllm_do_sample)
+    query_prompt = generation_prompt
+    raw_answer = ''
+    strategy_groups: List[Dict[str, object]] = []
+    strategy_contract_error: Optional[str] = None
+    max_generation_attempts = 1
+    for generation_attempt in range(max_generation_attempts):
+        raw_answer, error = query_vlm_text(image_path=reference_image_path, question=query_prompt, vlm_backend=strategy_mllm_backend, vlm_model_id=strategy_mllm_model_id, vlm_device_raw=str(args.gcg_scene_llm_device), max_new_tokens=int(args.gcg_scene_llm_max_new_tokens), enable_thinking=strategy_mllm_thinking, do_sample=strategy_mllm_do_sample, classifier_name=str(getattr(args, 'classifier_name', '')), runtime_cache=runtime_cache)
+        if error is not None:
+            return ([], str(raw_answer or ''), query_prompt, error)
+        if not flux2_strategy_prompt_mode:
+            break
+        try:
+            strategy_groups = parse_scene_vocab_strategy_groups(
+                str(raw_answer or ''),
+                prompts_per_strategy=int(prompts_per_strategy),
+                strategy_specs=strategy_specs,
+            )
+        except ValueError as exc:
+            strategy_groups = [
+                {
+                    'name': str(spec['name']),
+                    'title': str(spec['title']),
+                    'candidates': [],
+                }
+                for spec in strategy_specs
+            ]
+            strategy_contract_error = None
+            break
+        else:
+            # Each enabled strategy owns one requested slot.  Empty slots are
+            # retained so the attack core can skip them without charging the
+            # victim-query budget.  Extra candidates are ignored rather than
+            # creating replacement queries beyond the requested slot count.
+            normalized_strategy_groups: List[Dict[str, object]] = []
+            for group in strategy_groups:
+                candidates = [
+                    str(candidate).strip()
+                    for candidate in group.get('candidates', [])
+                    if str(candidate).strip()
+                ]
+                normalized_strategy_groups.append(
+                    {
+                        'name': str(group.get('name', '')),
+                        'title': str(group.get('title', group.get('name', ''))),
+                        'candidates': candidates[:int(prompts_per_strategy)],
+                    }
+                )
+            strategy_groups = normalized_strategy_groups
+            strategy_contract_error = None
+            break
+        if generation_attempt + 1 >= max_generation_attempts:
+            return (
+                [],
+                str(raw_answer or ''),
+                query_prompt,
+                str(strategy_contract_error),
+            )
+        correction_retry_number = generation_attempt + 1
+        normalized_current_prompt_for_correction = normalize_scene_vocab_word(
+            str(current_prompt)
+        )
+        query_prompt = (
+            generation_prompt
+            + '\nCONTRACT CORRECTION '
+            + f'{correction_retry_number}/{max_generation_attempts - 1}: '
+            + 'The previous response was invalid because '
+            + str(strategy_contract_error)
+            + '. Return exactly one non-empty, unique candidate for EACH of '
+            + 'background_shift, weather_atmosphere, and texture_material. '
+            + 'The current prompt is '
+            + json.dumps(
+                normalized_current_prompt_for_correction,
+                ensure_ascii=False,
+            )
+            + '; no candidate may equal the current prompt. '
+            + 'The rejected response was '
+            + json.dumps(str(raw_answer or '')[:2000], ensure_ascii=False)
+            + '. Return a different corrected response. '
+            + 'Use only the required JSON schema and no additional keys.'
+        )
+    generation_prompt = query_prompt
     if flux2_strategy_prompt_mode:
-        strategy_groups = parse_scene_vocab_strategy_groups(str(raw_answer or ''), prompts_per_strategy=int(prompts_per_strategy), strategy_specs=strategy_specs)
         strategy_entries = flatten_scene_vocab_strategy_groups(strategy_groups)
         words = [str(item['word']) for item in strategy_entries]
-        if len(words) == 0:
-            fallback_candidate = normalize_slot_value(str(raw_answer or ''), fallback_word, slot_kind)
-            if fallback_candidate:
-                first_spec = strategy_specs[0]
-                strategy_groups = [{'name': str(first_spec['name']), 'title': str(first_spec['title']), 'candidates': [fallback_candidate]}, *[{'name': str(spec['name']), 'title': str(spec['title']), 'candidates': []} for spec in strategy_specs[1:]]]
-                strategy_entries = flatten_scene_vocab_strategy_groups(strategy_groups)
-                words = [str(item['word']) for item in strategy_entries]
+        strategy_slots = []
+        for group in strategy_groups:
+            candidates = [
+                str(candidate).strip()
+                for candidate in group.get('candidates', [])
+                if str(candidate).strip()
+            ]
+            strategy_slots.append(
+                {
+                    'strategy_name': str(group.get('name', '')).strip(),
+                    'strategy_title': str(
+                        group.get('title', group.get('name', ''))
+                    ).strip(),
+                    'word': candidates[0] if candidates else '',
+                    'empty': not bool(candidates),
+                }
+            )
         setattr(args, '_scene_vocab_strategy_groups', list(strategy_groups))
         setattr(args, '_scene_vocab_strategy_entries', list(strategy_entries))
+        setattr(args, '_scene_vocab_strategy_slots', strategy_slots)
     else:
         parsed_limit = max(1, int(args.gcg_scene_vocab_size))
         words = parse_scene_vocab_words(str(raw_answer or ''), limit=parsed_limit)
@@ -791,24 +917,49 @@ def evaluate_attack_success_naturalness(
             'Return ONLY valid JSON with the schema {"natural": true, "feedback": ""}.'
         )
 
-    raw_answer, error = query_vlm_text(
-        image_path=Path(image_path),
-        question=eval_prompt,
-        vlm_backend=str(getattr(args, 'gcg_scene_llm_backend', 'gemma4')),
-        vlm_model_id=str(getattr(args, 'gcg_scene_llm_model_id', 'google/gemma-4-E4B-it')),
-        vlm_device_raw=str(getattr(args, 'gcg_scene_llm_device', 'auto')),
-        max_new_tokens=min(
-            512,
-            max(64, int(getattr(args, 'gcg_scene_llm_max_new_tokens', 512))),
+    if bool(getattr(args, 'class_ablation', False)):
+        eval_prompt += (
+            '\nSEMANTIC-PRIVACY REQUIREMENT:\n'
+            '- Do not identify, name, classify, describe, or infer any object, category,\n'
+            '  class, attribute, material, location, or scene in either image.\n'
+            '- Refer to image content only as "the main subject", "the source image",\n'
+            '  or "the edited image".\n'
+            '- Do not provide any explanation or free-form feedback.'
+        )
+
+    (
+        _,
+        verifier_backend,
+        verifier_model_id,
+        verifier_thinking,
+        verifier_do_sample,
+    ) = resolve_strategy_mllm_runtime(
+        mode=getattr(args, 'strategy_mllm_mode', 'configured'),
+        configured_backend=str(getattr(args, 'gcg_scene_llm_backend', 'gemma4')),
+        configured_model_id=str(
+            getattr(args, 'gcg_scene_llm_model_id', 'google/gemma-4-E4B-it')
         ),
-        enable_thinking=bool(
+        configured_thinking=bool(
             getattr(
                 args,
                 'gcg_eval_naturalness_llm_thinking',
                 getattr(args, 'gcg_scene_llm_thinking', False),
             )
         ),
-        do_sample=False,
+        configured_do_sample=False,
+    )
+    raw_answer, error = query_vlm_text(
+        image_path=Path(image_path),
+        question=eval_prompt,
+        vlm_backend=verifier_backend,
+        vlm_model_id=verifier_model_id,
+        vlm_device_raw=str(getattr(args, 'gcg_scene_llm_device', 'auto')),
+        max_new_tokens=min(
+            512,
+            max(64, int(getattr(args, 'gcg_scene_llm_max_new_tokens', 512))),
+        ),
+        enable_thinking=verifier_thinking,
+        do_sample=verifier_do_sample,
         classifier_name=str(getattr(args, 'classifier_name', '')),
         runtime_cache=runtime_cache,
     )

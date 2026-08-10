@@ -13,6 +13,11 @@ from PIL import Image
 
 from attack_model_registry import validate_generator_model
 from attack_runner_common import collect_sensitive_values, redact_transient_paths
+from vlm_runtime import (
+    SUPPORTED_STRATEGY_MLLM_MODES,
+    normalize_strategy_mllm_mode,
+    resolve_strategy_mllm_runtime,
+)
 
 try:
     from setproctitle import setproctitle as _setproctitle
@@ -222,6 +227,19 @@ def build_core_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gcg_scene_vocab_prompts_per_strategy", type=int, default=0)
     parser.add_argument("--gcg_scene_vocab_enabled_strategies", type=str, default="all")
     parser.add_argument("--gcg_slot_candidate_max_words", type=int, default=5)
+    parser.add_argument(
+        "--strategy_mllm_mode",
+        type=normalize_strategy_mllm_mode,
+        choices=SUPPORTED_STRATEGY_MLLM_MODES,
+        default="configured",
+        help=(
+            "Strategy-generation and naturalness-verifier MLLM. 'configured' "
+            "uses gcg_scene_llm_*; 'qwen3_vl_4b_instruct' uses "
+            "Qwen/Qwen3-VL-4B-Instruct; 'internvl3_5_4b' uses "
+            "OpenGVLab/InternVL3_5-4B; 'internvl3_5_4b_instruct' uses "
+            "OpenGVLab/InternVL3_5-4B-Instruct."
+        ),
+    )
     parser.add_argument("--gcg_candidate_source", type=str, default="vlm_query")
     parser.add_argument("--class_ablation", type=parse_bool_flag, default=False)
     parser.add_argument("--attack_mode", choices=["vlm", "and"], default="vlm")
@@ -231,7 +249,7 @@ def build_core_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gcg_eval_naturalness_on_attack_success",
         type=parse_bool_flag,
-        default=False,
+        default=True,
     )
     parser.add_argument(
         "--gcg_eval_naturalness_llm_thinking",
@@ -1003,6 +1021,11 @@ def write_report(
         "wandb_api_key_file",
     ):
         args_payload.pop(sensitive_key, None)
+    for private_key in tuple(args_payload):
+        if str(private_key).startswith(
+            ("_strategy_mllm_effective_", "_naturalness_verifier_effective_")
+        ):
+            args_payload.pop(private_key, None)
     args_payload["mode"] = "vlm_attack_black_box"
     if unknown_args:
         args_payload["ignored_cli_args"] = unknown_args
@@ -1015,20 +1038,80 @@ def write_report(
         "gcg_occurrence": int(args.gcg_occurrence),
         "attack_success_rule": attack_success_rule(str(args.classifier_objective)),
         "attack_success_requires_naturalness": bool(
-            getattr(args, "gcg_eval_naturalness_on_attack_success", False)
+            getattr(args, "gcg_eval_naturalness_on_attack_success", True)
         ),
         "naturalness_verifier": {
             "enabled": bool(
-                getattr(args, "gcg_eval_naturalness_on_attack_success", False)
+                getattr(args, "gcg_eval_naturalness_on_attack_success", True)
             ),
-            "backend": str(getattr(args, "gcg_scene_llm_backend", "gemma4")),
+            "mode": str(
+                getattr(args, "_strategy_mllm_effective_mode", "configured")
+            ),
+            "backend": str(
+                getattr(
+                    args,
+                    "_naturalness_verifier_effective_backend",
+                    getattr(args, "gcg_scene_llm_backend", "gemma4"),
+                )
+            ),
             "model_id": str(
-                getattr(args, "gcg_scene_llm_model_id", "google/gemma-4-E4B-it")
+                getattr(
+                    args,
+                    "_naturalness_verifier_effective_model_id",
+                    getattr(
+                        args,
+                        "gcg_scene_llm_model_id",
+                        "google/gemma-4-E4B-it",
+                    ),
+                )
             ),
             "thinking": bool(
-                getattr(args, "gcg_eval_naturalness_llm_thinking", False)
+                getattr(
+                    args,
+                    "_naturalness_verifier_effective_thinking",
+                    getattr(args, "gcg_eval_naturalness_llm_thinking", False),
+                )
             ),
-            "do_sample": False,
+            "do_sample": bool(
+                getattr(args, "_naturalness_verifier_effective_do_sample", False)
+            ),
+        },
+        "strategy_generator": {
+            "mode": str(
+                getattr(args, "_strategy_mllm_effective_mode", "configured")
+            ),
+            "backend": str(
+                getattr(
+                    args,
+                    "_strategy_mllm_effective_backend",
+                    getattr(args, "gcg_scene_llm_backend", "gemma4"),
+                )
+            ),
+            "model_id": str(
+                getattr(
+                    args,
+                    "_strategy_mllm_effective_model_id",
+                    getattr(
+                        args,
+                        "gcg_scene_llm_model_id",
+                        "google/gemma-4-E4B-it",
+                    ),
+                )
+            ),
+            "thinking": bool(
+                getattr(
+                    args,
+                    "_strategy_mllm_effective_thinking",
+                    getattr(args, "gcg_scene_llm_thinking", False),
+                )
+            ),
+            "do_sample": bool(
+                getattr(
+                    args,
+                    "_strategy_mllm_effective_do_sample",
+                    getattr(args, "gcg_scene_llm_do_sample", False),
+                )
+            ),
         },
         "victim_query_count": int(compute_victim_query_count(history)),
         "final_attack_success": final_attack_success,
@@ -1096,7 +1179,15 @@ def get_editable_prompt(args: argparse.Namespace) -> str:
 
 
 def infer_imagenet_class_name(model_name: str, label_idx: int) -> str:
-    csv_path = Path(__file__).resolve().parent / "data" / "nips2017" / "categories.csv"
+    module_path = Path(__file__).resolve()
+    csv_candidates = (
+        module_path.parents[1] / "data" / "nips2017" / "categories.csv",
+        module_path.parent / "data" / "nips2017" / "categories.csv",
+    )
+    csv_path = next(
+        (path for path in csv_candidates if path.is_file()),
+        csv_candidates[0],
+    )
     idx = int(label_idx)
     csv_category_id = idx + 1
     if csv_path.is_file():
@@ -1372,9 +1463,42 @@ def run_blackbox_attack_core(
 ) -> Dict[str, object]:
     args.classifier_mode = "black-box"
     args.attack_mode = normalize_attack_mode(getattr(args, "attack_mode", "vlm"))
+    (
+        args._strategy_mllm_effective_mode,
+        args._strategy_mllm_effective_backend,
+        args._strategy_mllm_effective_model_id,
+        args._strategy_mllm_effective_thinking,
+        args._strategy_mllm_effective_do_sample,
+    ) = resolve_strategy_mllm_runtime(
+        mode=getattr(args, "strategy_mllm_mode", "configured"),
+        configured_backend=str(getattr(args, "gcg_scene_llm_backend", "gemma4")),
+        configured_model_id=str(
+            getattr(args, "gcg_scene_llm_model_id", "google/gemma-4-E4B-it")
+        ),
+        configured_thinking=bool(getattr(args, "gcg_scene_llm_thinking", False)),
+        configured_do_sample=bool(getattr(args, "gcg_scene_llm_do_sample", False)),
+    )
+    args.strategy_mllm_mode = str(args._strategy_mllm_effective_mode)
+    (
+        _,
+        args._naturalness_verifier_effective_backend,
+        args._naturalness_verifier_effective_model_id,
+        args._naturalness_verifier_effective_thinking,
+        args._naturalness_verifier_effective_do_sample,
+    ) = resolve_strategy_mllm_runtime(
+        mode=args.strategy_mllm_mode,
+        configured_backend=str(getattr(args, "gcg_scene_llm_backend", "gemma4")),
+        configured_model_id=str(
+            getattr(args, "gcg_scene_llm_model_id", "google/gemma-4-E4B-it")
+        ),
+        configured_thinking=bool(
+            getattr(args, "gcg_eval_naturalness_llm_thinking", False)
+        ),
+        configured_do_sample=False,
+    )
     args.generator_backend = validate_supported_generator(args.model_path)
     naturalness_verifier_enabled = bool(
-        getattr(args, "gcg_eval_naturalness_on_attack_success", False)
+        getattr(args, "gcg_eval_naturalness_on_attack_success", True)
     )
     and_mode_enabled = bool(args.attack_mode == "and")
     args.gcg_candidate_source = (
@@ -1779,6 +1903,10 @@ def run_blackbox_attack_core(
             candidate_strategy_names_for_eval: List[str] = []
             candidate_strategy_titles_for_eval: List[str] = []
             generated_strategy_entries: List[Dict[str, object]] = []
+            generated_strategy_slots: List[Dict[str, object]] = []
+            empty_strategy_slot_count = 0
+            duplicate_strategy_slot_count = 0
+            duplicate_strategy_query_count = 0
 
             cwor_enabled = bool(getattr(args, "cwor_enable", False))
             strategy_cwor_runtime_enabled = bool(
@@ -1862,8 +1990,25 @@ def run_blackbox_attack_core(
                             generated_strategy_entries = [
                                 dict(item) for item in raw_strategy_entries if isinstance(item, dict)
                             ]
+                        raw_strategy_slots = getattr(args, "_scene_vocab_strategy_slots", [])
+                        if isinstance(raw_strategy_slots, list):
+                            generated_strategy_slots = [
+                                dict(item) for item in raw_strategy_slots if isinstance(item, dict)
+                            ]
+                        empty_strategy_slot_count = sum(
+                            1
+                            for item in generated_strategy_slots
+                            if not str(item.get("word", "")).strip()
+                        )
+                        if vlm_error is not None:
+                            raise RuntimeError(
+                                "strict strategy generation failed: "
+                                + str(vlm_error)
+                            )
 
-                if candidate_source != "gemma_scene_vocab" or len(generated_words) == 0:
+                if candidate_source != "gemma_scene_vocab" or (
+                    len(generated_words) == 0 and not flux2_strategy_cwor_enabled
+                ):
                     candidate_word, raw_answer_simple, vlm_error_simple = runtime.query_vlm_word(
                         image_path=Path(str(step_input_img_path)),
                         args=args,
@@ -1891,6 +2036,7 @@ def run_blackbox_attack_core(
                         or bool(getattr(args, "qwen_edit_prompt_mode", False))
                         or bool(getattr(args, "qwen_strategy_and_enable", False))
                     )
+                    seen_candidate_prompts = {str(current_prompt).strip().casefold()}
                     for word_idx, word in enumerate(generated_words):
                         if flux2_prompt_word_only:
                             candidate_prompt_try = str(word).strip()
@@ -1902,7 +2048,19 @@ def run_blackbox_attack_core(
                                 replacement=word,
                                 occurrence=int(args.gcg_occurrence),
                             )
-                        if replaced_try and candidate_prompt_try != current_prompt:
+                        candidate_prompt_key = str(candidate_prompt_try).strip().casefold()
+                        if (
+                            replaced_try
+                            and candidate_prompt_key
+                            and candidate_prompt_key not in seen_candidate_prompts
+                        ):
+                            if (
+                                len(candidate_prompts_for_eval)
+                                + int(duplicate_strategy_query_count)
+                                >= int(remaining_query_budget_before_step)
+                            ):
+                                break
+                            seen_candidate_prompts.add(candidate_prompt_key)
                             candidate_words_for_eval.append(str(word))
                             candidate_prompts_for_eval.append(candidate_prompt_try)
                             strategy_name = ""
@@ -1921,6 +2079,15 @@ def run_blackbox_attack_core(
                             candidate_strategy_titles_for_eval.append(strategy_title)
                             if len(candidate_prompts_for_eval) >= max_eval_candidates:
                                 break
+                        elif replaced_try and candidate_prompt_key:
+                            if (
+                                len(candidate_prompts_for_eval)
+                                + int(duplicate_strategy_query_count)
+                                >= int(remaining_query_budget_before_step)
+                            ):
+                                break
+                            duplicate_strategy_slot_count += 1
+                            duplicate_strategy_query_count += 1
 
                     if len(candidate_prompts_for_eval) > 0:
                         prompt_score_errors: List[str] = []
@@ -1941,12 +2108,17 @@ def run_blackbox_attack_core(
                             len(branch_results),
                         )
                         try:
-                            prompt_query_attempt_count += max(
+                            prompt_query_attempt_count = int(
+                                duplicate_strategy_query_count
+                            ) + max(
                                 0,
                                 int(raw_prompt_query_count),
                             )
                         except Exception:
-                            prompt_query_attempt_count += int(len(branch_results))
+                            prompt_query_attempt_count = int(
+                                duplicate_strategy_query_count
+                                + len(branch_results)
+                            )
                         for result_idx, item in enumerate(branch_results):
                             if int(result_idx) < len(candidate_strategy_names_for_eval):
                                 strategy_name = str(candidate_strategy_names_for_eval[int(result_idx)]).strip()
@@ -1961,6 +2133,9 @@ def run_blackbox_attack_core(
                         if len(prompt_score_errors) > 0:
                             prompt_score_error = " | ".join(prompt_score_errors)
                     else:
+                        prompt_query_attempt_count = int(
+                            duplicate_strategy_query_count
+                        )
                         prompt_score_error = "no_candidates"
             else:
                 vlm_error = "skipped_text_eval_due_to_cwor_success"
@@ -1992,7 +2167,15 @@ def run_blackbox_attack_core(
 
                 candidate_item["naturalness_checked"] = True
                 candidate_item["naturalness_model_id"] = str(
-                    getattr(args, "gcg_scene_llm_model_id", "google/gemma-4-E4B-it")
+                    getattr(
+                        args,
+                        "_naturalness_verifier_effective_model_id",
+                        getattr(
+                            args,
+                            "gcg_scene_llm_model_id",
+                            "google/gemma-4-E4B-it",
+                        ),
+                    )
                 )
                 evaluator = getattr(runtime, "evaluate_naturalness", None)
                 if not callable(evaluator):
@@ -2462,6 +2645,11 @@ def run_blackbox_attack_core(
                 "token_update_method": "vlm_black_box",
                 "requested_candidate_source": candidate_source,
                 "scene_vocab_selected_words": list(generated_words),
+                "strategy_query_accounting_version": 3,
+                "strategy_slot_count": int(len(generated_strategy_slots)),
+                "strategy_empty_skipped_count": int(empty_strategy_slot_count),
+                "strategy_duplicate_skipped_count": int(duplicate_strategy_slot_count),
+                "strategy_duplicate_query_count": int(duplicate_strategy_query_count),
                 "candidate_count": int(len(scored_candidates)),
                 "candidate_text_count": int(len(candidate_prompts_for_eval)),
                 "next_step_prompt_feedback_candidate_count": int(len(prompt_feedback_candidates)),

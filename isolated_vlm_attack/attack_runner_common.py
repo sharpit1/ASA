@@ -12,6 +12,11 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from vlm_runtime import (
+    SUPPORTED_STRATEGY_MLLM_MODES,
+    normalize_strategy_mllm_mode,
+)
+
 
 SAVED_IMAGE_SIZE = 224
 SUPPORTED_ATTACK_MODES = ("vlm", "and")
@@ -915,6 +920,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gcg_slot_candidate_max_words", type=int, default=5)
     parser.add_argument("--gcg_scene_feedback_limit", type=int, default=1000)
     parser.add_argument(
+        "--strategy_mllm_mode",
+        type=normalize_strategy_mllm_mode,
+        choices=SUPPORTED_STRATEGY_MLLM_MODES,
+        default="configured",
+        help=(
+            "Strategy-generation and naturalness-verifier MLLM. 'configured' "
+            "uses gcg_scene_llm_*; 'qwen3_vl_4b_instruct' uses "
+            "Qwen/Qwen3-VL-4B-Instruct; 'internvl3_5_4b' uses "
+            "OpenGVLab/InternVL3_5-4B; 'internvl3_5_4b_instruct' uses "
+            "OpenGVLab/InternVL3_5-4B-Instruct."
+        ),
+    )
+    parser.add_argument(
         "--class_ablation",
         type=parse_bool_flag,
         default=False,
@@ -983,6 +1001,7 @@ def build_core_cli(
         "--gcg_scene_vocab_enabled_strategies", str(cfg.gcg_scene_vocab_enabled_strategies),
         "--gcg_slot_candidate_max_words", str(int(cfg.gcg_slot_candidate_max_words)),
         "--gcg_scene_feedback_limit", str(int(cfg.gcg_scene_feedback_limit)),
+        "--strategy_mllm_mode", str(cfg.strategy_mllm_mode),
         "--class_ablation", "1" if cfg.class_ablation else "0",
         "--gcg_candidate_source", str(cfg.gcg_candidate_source),
         "--attack_mode", str(cfg.attack_mode),

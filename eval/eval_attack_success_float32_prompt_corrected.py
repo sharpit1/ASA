@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -20,6 +22,115 @@ for _path in (_REPO_ROOT, _ISOLATED_ROOT):
         sys.path.insert(0, str(_path))
 
 from attack_runner_common import SAVED_IMAGE_SIZE, VictimModelAdapter
+
+
+def load_category_phrases(path: Path) -> Dict[int, List[str]]:
+    """Load the same prompt-label aliases used by eval_asr_from_npz.py."""
+
+    excluded_phrases = {"light"}
+    category_phrases: Dict[int, List[str]] = {}
+    with path.open(encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile, delimiter=",")
+        for row in reader:
+            try:
+                label_idx = int(row["CategoryId"]) - 1
+            except Exception:
+                continue
+            raw_name = str(row.get("CategoryName", "")).strip()
+            phrases = [
+                phrase.strip().lower()
+                for phrase in raw_name.split(",")
+                if phrase.strip()
+                and phrase.strip().lower() not in excluded_phrases
+            ]
+            if label_idx >= 0 and phrases:
+                category_phrases[label_idx] = phrases
+    return category_phrases
+
+
+def phrase_in_prompt(phrase: str, prompt: str) -> bool:
+    """Match a category alias on the same token boundaries as eval_all."""
+
+    pattern = r"(?<![a-z0-9]){}(?![a-z0-9])".format(
+        re.escape(phrase.lower())
+    )
+    return re.search(pattern, prompt.lower()) is not None
+
+
+def build_prompt_correct_label_set(
+    prompt: str,
+    category_phrases: Dict[int, List[str]],
+) -> set[int]:
+    return {
+        label_idx
+        for label_idx, phrases in category_phrases.items()
+        if any(phrase_in_prompt(phrase, prompt) for phrase in phrases)
+    }
+
+
+def load_npz_source_prompts(run_root: Path) -> Dict[int, str]:
+    """Map sample indices to the source_prompt values already used by eval_all."""
+
+    npz_path = run_root / "adversarial_examples.npz"
+    if not npz_path.is_file():
+        return {}
+    with np.load(npz_path, allow_pickle=False) as npz_data:
+        if "source_prompt" not in npz_data.files:
+            return {}
+        prompts = np.asarray(npz_data["source_prompt"]).astype(str).reshape(-1)
+        sample_names = (
+            np.asarray(npz_data["sample_names"]).astype(str).reshape(-1)
+            if "sample_names" in npz_data.files
+            else None
+        )
+    if sample_names is not None and sample_names.size != prompts.size:
+        raise ValueError(
+            f"{npz_path}: source_prompt has {prompts.size} values but "
+            f"sample_names has {sample_names.size}"
+        )
+
+    prompt_by_index: Dict[int, str] = {}
+    for position, prompt in enumerate(prompts):
+        sample_index = position
+        if sample_names is not None:
+            match = re.fullmatch(r"sample_(\d+)", str(sample_names[position]))
+            if match is not None:
+                sample_index = int(match.group(1))
+        if sample_index in prompt_by_index:
+            raise ValueError(
+                f"{npz_path}: duplicate source prompt for sample {sample_index}"
+            )
+        prompt_by_index[sample_index] = str(prompt)
+    return prompt_by_index
+
+
+def resolve_source_prompt(
+    *,
+    sample_index: int,
+    sample_dir: Path,
+    npz_source_prompts: Dict[int, str],
+) -> Optional[str]:
+    """Resolve the final attack prompt, preferring eval_all's stored NPZ value."""
+
+    if sample_index in npz_source_prompts:
+        return npz_source_prompts[sample_index]
+    report_path = sample_dir / "report.json"
+    if not report_path.is_file():
+        return None
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    for value in (
+        report.get("optimized_prompt"),
+        (report.get("early_stop") or {}).get("candidate_prompt")
+        if isinstance(report.get("early_stop"), dict)
+        else None,
+        (report.get("attack_success_candidate") or {}).get("candidate_prompt")
+        if isinstance(report.get("attack_success_candidate"), dict)
+        else None,
+    ):
+        prompt = str(value or "").strip()
+        if prompt:
+            return prompt
+    return None
 
 
 def load_classifier_input(path: Path) -> np.ndarray:
@@ -72,8 +183,14 @@ def compute_untarget_asr(samples: List[Dict[str, object]]) -> Dict[str, object]:
     attack_success = [
         sample
         for sample in clean_correct
-        if sample.get("adv_pred_idx") is not None
-        and int(sample["adv_pred_idx"]) != int(sample["true_label"])
+        if (
+            bool(sample["attack_success"])
+            if "attack_success" in sample
+            else (
+                sample.get("adv_pred_idx") is not None
+                and int(sample["adv_pred_idx"]) != int(sample["true_label"])
+            )
+        )
     ]
     attack_success_query_counts = [
         int(sample["attack_success_query_count"])
@@ -150,6 +267,7 @@ def evaluate_run(
     run_root: Path,
     dataset_root: Optional[Path] = None,
     device: str = "auto",
+    prompt_label_correct: bool = True,
 ) -> Dict[str, object]:
     run_root = run_root.expanduser().resolve()
     summary_path = run_root / "run_summary.json"
@@ -171,6 +289,16 @@ def evaluate_run(
     images_dir = dataset_root / "images"
     if not images_dir.is_dir():
         raise FileNotFoundError(f"clean image directory not found: {images_dir}")
+    category_phrases: Dict[int, List[str]] = {}
+    npz_source_prompts: Dict[int, str] = {}
+    if prompt_label_correct:
+        categories_path = dataset_root / "categories.csv"
+        if not categories_path.is_file():
+            raise FileNotFoundError(
+                f"prompt-label correctness requires categories.csv: {categories_path}"
+            )
+        category_phrases = load_category_phrases(categories_path)
+        npz_source_prompts = load_npz_source_prompts(run_root)
 
     resolved_device = (
         "cuda" if device == "auto" and torch.cuda.is_available() else device
@@ -202,6 +330,20 @@ def evaluate_run(
 
         sample_dir = resolve_sample_dir(run_root, result)
         sidecar_path = resolve_sidecar_path(sample_dir, result)
+        source_prompt = (
+            resolve_source_prompt(
+                sample_index=sample_index,
+                sample_dir=sample_dir,
+                npz_source_prompts=npz_source_prompts,
+            )
+            if prompt_label_correct
+            else None
+        )
+        prompt_correct_labels = (
+            build_prompt_correct_label_set(source_prompt, category_phrases)
+            if source_prompt is not None
+            else set()
+        )
         adv_pred_idx = None
         if sidecar_path is not None:
             adv_pred_idx = predict_label(
@@ -210,10 +352,17 @@ def evaluate_run(
             )
 
         clean_correct = clean_pred_idx == true_label
-        attack_success = (
+        attack_success_without_prompt_correction = (
             clean_correct
             and adv_pred_idx is not None
             and adv_pred_idx != true_label
+        )
+        prompt_label_match = (
+            adv_pred_idx is not None and adv_pred_idx in prompt_correct_labels
+        )
+        attack_success = (
+            attack_success_without_prompt_correction
+            and not prompt_label_match
         )
         raw_attack_success_query_count = result.get(
             "attack_success_query_count"
@@ -236,6 +385,12 @@ def evaluate_run(
                     else None
                 ),
                 "adv_pred_idx": adv_pred_idx,
+                "source_prompt": source_prompt,
+                "prompt_correct_labels": sorted(prompt_correct_labels),
+                "prompt_label_match": prompt_label_match,
+                "attack_success_without_prompt_correction": (
+                    attack_success_without_prompt_correction
+                ),
                 "attack_success": attack_success,
                 "attack_success_query_count": attack_success_query_count,
             }
@@ -243,6 +398,15 @@ def evaluate_run(
 
     asr = compute_untarget_asr(samples)
     clean_correct_count = int(asr["untarget_asr_denominator"])
+    attack_success_without_prompt_correction_count = sum(
+        bool(sample["attack_success_without_prompt_correction"])
+        for sample in samples
+    )
+    attack_success_excluded_by_prompt_correction_count = sum(
+        bool(sample["attack_success_without_prompt_correction"])
+        and bool(sample["prompt_label_match"])
+        for sample in samples
+    )
     return {
         "run_root": str(run_root),
         "dataset_root": str(dataset_root),
@@ -254,11 +418,25 @@ def evaluate_run(
         "float32_sidecar_count": sum(
             sample["float32_path"] is not None for sample in samples
         ),
+        "prompt_label_correct_enabled": prompt_label_correct,
+        "source_prompt_count": sum(
+            sample["source_prompt"] is not None for sample in samples
+        ),
+        "prompt_category_match_count": sum(
+            bool(sample["prompt_correct_labels"]) for sample in samples
+        ),
+        "attack_success_without_prompt_correction_count": (
+            attack_success_without_prompt_correction_count
+        ),
+        "attack_success_excluded_by_prompt_correction_count": (
+            attack_success_excluded_by_prompt_correction_count
+        ),
         **asr,
         "untarget_asr_denominator_definition": "clean_pred_idx == true_label",
         "untarget_asr_numerator_definition": (
             "clean_pred_idx == true_label and float32 sidecar exists "
-            "and adv_pred_idx != true_label"
+            "and adv_pred_idx != true_label and adv_pred_idx is not in "
+            "the source-prompt-derived correct-label set"
         ),
         "attack_success_query_count_mean_definition": (
             "mean attack_success_query_count over float32-verified "
@@ -288,6 +466,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
     )
     parser.add_argument(
+        "--prompt-label-correct",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Treat predictions named in source_prompt as correct, matching "
+            "eval_all.py (enabled by default)."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -302,6 +489,7 @@ def main() -> int:
         run_root=args.run_root,
         dataset_root=args.dataset_root,
         device=args.device,
+        prompt_label_correct=args.prompt_label_correct,
     )
     output_path = (
         args.output.expanduser().resolve()

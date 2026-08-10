@@ -56,6 +56,7 @@ run_args:
   scene_vlm_do_sample: false
   gcg_scene_llm_model_id: google/gemma-4-E4B-it # google/gemma-3-12b-it |google/gemma-4-E4B-it |  google/gemma-4-26B-A4B-it | google/gemma-4-31B-it
   gcg_scene_llm_thinking: false
+  gcg_scene_llm_do_sample: true
   gcg_slot_candidate_max_words: 5
   gcg_early_stop_on_attack_success: true
   gcg_eval_naturalness_on_attack_success: true

@@ -40,22 +40,6 @@ class Float32AttackEvaluationTests(unittest.TestCase):
         self.assertEqual(result["untarget_asr_numerator"], 0)
         self.assertIsNone(result["untarget_asr"])
 
-    def test_untarget_asr_honors_explicit_prompt_adjusted_success(self) -> None:
-        result = compute_untarget_asr(
-            [
-                {
-                    "true_label": 1,
-                    "clean_pred_idx": 1,
-                    "adv_pred_idx": 2,
-                    "attack_success": False,
-                }
-            ]
-        )
-
-        self.assertEqual(result["untarget_asr_denominator"], 1)
-        self.assertEqual(result["untarget_asr_numerator"], 0)
-        self.assertEqual(result["untarget_asr"], 0.0)
-
     def test_float32_sidecar_is_loaded_without_clipping(self) -> None:
         classifier_input = np.zeros((3, 224, 224), dtype=np.float32)
         classifier_input[0, 0, 0] = np.float32(1.0000004)
@@ -123,80 +107,13 @@ class Float32AttackEvaluationTests(unittest.TestCase):
                     side_effect=(1, 2, 2, 2, 3, 0, 5),
                 ),
             ):
-                payload = evaluate_run(
-                    run_root=run_root,
-                    device="cpu",
-                    prompt_label_correct=False,
-                )
+                payload = evaluate_run(run_root=run_root, device="cpu")
 
         self.assertEqual(payload["sample_count"], 4)
         self.assertEqual(payload["float32_sidecar_count"], 3)
         self.assertEqual(payload["untarget_asr_denominator"], 3)
         self.assertEqual(payload["untarget_asr_numerator"], 1)
         self.assertAlmostEqual(payload["untarget_asr"], 100.0 / 3.0)
-
-    def test_evaluate_run_excludes_prediction_named_in_source_prompt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            run_root = root / "run"
-            dataset_root = root / "dataset"
-            images_dir = dataset_root / "images"
-            images_dir.mkdir(parents=True)
-            Image.new("RGB", (8, 8)).save(images_dir / "image_0.png")
-            (dataset_root / "categories.csv").write_text(
-                "CategoryId,CategoryName\n3,library\n",
-                encoding="utf-8",
-            )
-            sample_dir = run_root / "sample_0000"
-            sidecar_path = sample_dir / "images" / "attack_success.float32.npy"
-            sidecar_path.parent.mkdir(parents=True)
-            np.save(
-                sidecar_path,
-                np.zeros((3, 224, 224), dtype=np.float32),
-                allow_pickle=False,
-            )
-            (sample_dir / "report.json").write_text(
-                json.dumps({"optimized_prompt": "place it in a library"}),
-                encoding="utf-8",
-            )
-            (run_root / "run_summary.json").write_text(
-                json.dumps(
-                    {
-                        "dataset_root": str(dataset_root),
-                        "victim_model": "resnet50",
-                        "results": [
-                            {
-                                "sample_index": 0,
-                                "image_id": "image_0",
-                                "true_label": 1,
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with (
-                patch(
-                    "eval.eval_attack_success_float32.VictimModelAdapter",
-                    return_value=Mock(),
-                ),
-                patch(
-                    "eval.eval_attack_success_float32.predict_label",
-                    side_effect=(1, 2),
-                ),
-            ):
-                payload = evaluate_run(run_root=run_root, device="cpu")
-
-        self.assertEqual(
-            payload["attack_success_without_prompt_correction_count"], 1
-        )
-        self.assertEqual(
-            payload["attack_success_excluded_by_prompt_correction_count"], 1
-        )
-        self.assertEqual(payload["untarget_asr_numerator"], 0)
-        self.assertEqual(payload["samples"][0]["prompt_correct_labels"], [2])
-        self.assertTrue(payload["samples"][0]["prompt_label_match"])
 
 
 if __name__ == "__main__":
