@@ -12,6 +12,11 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from vlm_runtime import (
+    SUPPORTED_STRATEGY_MLLM_MODES,
+    normalize_strategy_mllm_mode,
+)
+
 
 SAVED_IMAGE_SIZE = 224
 SUPPORTED_ATTACK_MODES = ("vlm", "and")
@@ -794,6 +799,28 @@ def select_clean_correct_indices(
     return selected, records
 
 
+def sample_clean_correct_indices(
+    clean_correct_indices: Sequence[int] | Set[int],
+    *,
+    sample_size: int,
+    seed: int,
+) -> Set[int]:
+    """Select a deterministic, non-replacement subset of clean-correct indices."""
+
+    size = int(sample_size)
+    if size < 1:
+        raise ValueError(f"clean_correct_sample_size must be >= 1 (got {size})")
+
+    population = sorted({int(idx) for idx in clean_correct_indices})
+    if size > len(population):
+        raise ValueError(
+            "clean_correct_sample_size exceeds the clean-correct pool: "
+            f"requested={size} available={len(population)}"
+        )
+
+    return set(random.Random(int(seed)).sample(population, size))
+
+
 def resolve_optional_hf_token(explicit: str) -> str:
     token = str(explicit or "").strip()
     if token:
@@ -856,6 +883,21 @@ def build_parser() -> argparse.ArgumentParser:
             "max_victim_queries."
         ),
     )
+    parser.add_argument(
+        "--clean_correct_sample_size",
+        type=int,
+        default=0,
+        help=(
+            "When positive, attack exactly this many samples drawn without "
+            "replacement from the clean-correct pool."
+        ),
+    )
+    parser.add_argument(
+        "--clean_correct_sample_seed",
+        type=int,
+        default=None,
+        help="Seed used to sample --clean_correct_sample_size indices.",
+    )
     parser.add_argument("--image_size", type=int, default=SAVED_IMAGE_SIZE)
     parser.add_argument("--batchsize", type=int, default=1)
     parser.add_argument("--victim_model", default="resnet50")
@@ -877,6 +919,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gcg_scene_vocab_enabled_strategies", default="all")
     parser.add_argument("--gcg_slot_candidate_max_words", type=int, default=5)
     parser.add_argument("--gcg_scene_feedback_limit", type=int, default=1000)
+    parser.add_argument(
+        "--strategy_mllm_mode",
+        type=normalize_strategy_mllm_mode,
+        choices=SUPPORTED_STRATEGY_MLLM_MODES,
+        default="configured",
+        help=(
+            "Strategy-generation and naturalness-verifier MLLM. 'configured' "
+            "uses gcg_scene_llm_*; 'qwen3_vl_4b_instruct' uses "
+            "Qwen/Qwen3-VL-4B-Instruct; 'internvl3_5_4b' uses "
+            "OpenGVLab/InternVL3_5-4B; 'internvl3_5_4b_instruct' uses "
+            "OpenGVLab/InternVL3_5-4B-Instruct."
+        ),
+    )
     parser.add_argument(
         "--class_ablation",
         type=parse_bool_flag,
@@ -946,6 +1001,7 @@ def build_core_cli(
         "--gcg_scene_vocab_enabled_strategies", str(cfg.gcg_scene_vocab_enabled_strategies),
         "--gcg_slot_candidate_max_words", str(int(cfg.gcg_slot_candidate_max_words)),
         "--gcg_scene_feedback_limit", str(int(cfg.gcg_scene_feedback_limit)),
+        "--strategy_mllm_mode", str(cfg.strategy_mllm_mode),
         "--class_ablation", "1" if cfg.class_ablation else "0",
         "--gcg_candidate_source", str(cfg.gcg_candidate_source),
         "--attack_mode", str(cfg.attack_mode),

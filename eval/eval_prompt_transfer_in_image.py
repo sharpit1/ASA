@@ -80,14 +80,6 @@ MODEL_NAME_ALIASES = {
     "deit_base": "deit-b",
     "mambavision": "mambavision",
     "mamba-vision": "mambavision",
-    "clip": "clip",
-    "openai-clip": "clip",
-    "clip-vit-base-patch16": "clip",
-    "clip-vit-b-16": "clip",
-    "openai/clip-vit-base-patch16": "clip",
-    "siglip2": "siglip2",
-    "siglip2-base-patch16-224": "siglip2",
-    "google/siglip2-base-patch16-224": "siglip2",
 }
 
 
@@ -714,44 +706,7 @@ def align_classifier_logits_for_eval(model_name: Optional[str], logits: np.ndarr
     return logits
 
 
-def build_prompt_ensemble_classifier(model_name: str, device: str):
-    normalized_model_name = normalize_model_name(model_name)
-    if normalized_model_name not in {"clip", "siglip2"}:
-        raise ValueError(
-            f"prompt-ensemble classifier does not support '{model_name}'"
-        )
-
-    isolated_root = _REPO_ROOT / "isolated_vlm_attack"
-    isolated_root_str = str(isolated_root)
-    if isolated_root_str not in sys.path:
-        sys.path.insert(0, isolated_root_str)
-
-    from isolated_vlm_attack.attack_runner_common import (
-        OPENAI_CLIP_IMAGENET_MODEL_ID,
-        SIGLIP2_IMAGENET_MODEL_ID,
-        _OpenAIClipImageNetClassifier,
-        _Siglip2ImageNetClassifier,
-    )
-
-    if normalized_model_name == "clip":
-        classifier_type = _OpenAIClipImageNetClassifier
-        model_id = OPENAI_CLIP_IMAGENET_MODEL_ID
-    else:
-        classifier_type = _Siglip2ImageNetClassifier
-        model_id = SIGLIP2_IMAGENET_MODEL_ID
-
-    logger.log(
-        "building ImageNet prompt-ensemble classifier | "
-        f"model_name={normalized_model_name} | model_id={model_id}"
-    )
-    return classifier_type(model_id=model_id, device=torch.device(device))
-
-
-def build_art_classifier(model_name: str, res: int, device: str):
-    normalized_model_name = normalize_model_name(model_name)
-    if normalized_model_name in {"clip", "siglip2"}:
-        return build_prompt_ensemble_classifier(normalized_model_name, device)
-
+def build_art_classifier(model_name: str, res: int, device: str) -> PyTorchClassifier:
     if PyTorchClassifier is None:
         raise ImportError(
             "adversarial-robustness-toolbox is required for transfer evaluation"

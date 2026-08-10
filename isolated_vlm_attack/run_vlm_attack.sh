@@ -216,6 +216,8 @@ mapping = {
     "sample_indices": "SAMPLE_INDICES",
     "sample_indices_file": "SAMPLE_INDICES_FILE",
     "attack_only_clean_correct": "ATTACK_ONLY_CLEAN_CORRECT",
+    "clean_correct_sample_size": "CLEAN_CORRECT_SAMPLE_SIZE",
+    "clean_correct_sample_seed": "CLEAN_CORRECT_SAMPLE_SEED",
     "image_size": "IMAGE_SIZE",
     "saved_image_size": "SAVED_IMAGE_SIZE",
     "batchsize": "BATCHSIZE",
@@ -243,6 +245,7 @@ mapping = {
     "gcg_scene_vocab_prompts_per_strategy": "GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY",
     "gcg_scene_vocab_enabled_strategies": "GCG_SCENE_VOCAB_ENABLED_STRATEGIES",
     "gcg_slot_candidate_max_words": "GCG_SLOT_CANDIDATE_MAX_WORDS",
+    "strategy_mllm_mode": "STRATEGY_MLLM_MODE",
     "class_ablation": "CLASS_ABLATION",
     "gcg_candidate_source": "GCG_CANDIDATE_SOURCE",
     "gcg_scene_vocab_feedback": "GCG_SCENE_VOCAB_FEEDBACK",
@@ -365,6 +368,8 @@ MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 SAMPLE_INDICES="${SAMPLE_INDICES:-}"
 SAMPLE_INDICES_FILE="${SAMPLE_INDICES_FILE:-}"
 ATTACK_ONLY_CLEAN_CORRECT="${ATTACK_ONLY_CLEAN_CORRECT:-0}"
+CLEAN_CORRECT_SAMPLE_SIZE="${CLEAN_CORRECT_SAMPLE_SIZE:-0}"
+CLEAN_CORRECT_SAMPLE_SEED="${CLEAN_CORRECT_SAMPLE_SEED:-}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 BATCHSIZE="${BATCHSIZE:-1}"
 VICTIM_MODEL="${VICTIM_MODEL:-resnet50}"
@@ -457,17 +462,34 @@ GCG_SCENE_VOCAB_SIZE="${GCG_SCENE_VOCAB_SIZE:-100}"
 GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY="${GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY:-0}"
 GCG_SCENE_VOCAB_ENABLED_STRATEGIES="${GCG_SCENE_VOCAB_ENABLED_STRATEGIES:-all}"
 GCG_SLOT_CANDIDATE_MAX_WORDS="${GCG_SLOT_CANDIDATE_MAX_WORDS:-5}"
+STRATEGY_MLLM_MODE="${STRATEGY_MLLM_MODE:-configured}"
 CLASS_ABLATION="${CLASS_ABLATION:-0}"
 GCG_SCENE_VOCAB_FEEDBACK="${GCG_SCENE_VOCAB_FEEDBACK:-1}"
 GCG_SCENE_FEEDBACK_LIMIT="${GCG_SCENE_FEEDBACK_LIMIT:-1000}"
 GCG_CANDIDATE_SOURCE="${GCG_CANDIDATE_SOURCE:-}"
-GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS="${GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS:-0}"
+GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS="${GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS:-1}"
 GCG_EVAL_NATURALNESS_LLM_THINKING="${GCG_EVAL_NATURALNESS_LLM_THINKING:-0}"
 case "${CLASS_ABLATION,,}" in
   1|true|yes|on) CLASS_ABLATION="1" ;;
   0|false|no|off|'') CLASS_ABLATION="0" ;;
   *)
     echo "ERROR: CLASS_ABLATION must be boolean-like (got '$CLASS_ABLATION')." >&2
+    exit 1
+    ;;
+esac
+case "${STRATEGY_MLLM_MODE,,}" in
+  configured|default|shared) STRATEGY_MLLM_MODE="configured" ;;
+  qwen3_vl_4b|qwen3_vl_4b_instruct|qwen3-vl-4b|qwen3-vl-4b-instruct)
+    STRATEGY_MLLM_MODE="qwen3_vl_4b_instruct"
+    ;;
+  internvl3_5_4b|internvl3.5-4b|opengvlab/internvl3_5-4b)
+    STRATEGY_MLLM_MODE="internvl3_5_4b"
+    ;;
+  internvl3_5_4b_instruct|internvl3.5-4b-instruct|opengvlab/internvl3_5-4b-instruct)
+    STRATEGY_MLLM_MODE="internvl3_5_4b_instruct"
+    ;;
+  *)
+    echo "ERROR: STRATEGY_MLLM_MODE must be configured, qwen3_vl_4b_instruct, internvl3_5_4b, or internvl3_5_4b_instruct (got '$STRATEGY_MLLM_MODE')." >&2
     exit 1
     ;;
 esac
@@ -578,10 +600,12 @@ Core environment overrides:
   CONFIG, RUNNER_VARIANT, CUDA_VISIBLE_DEVICES
   DATASET_ROOT, DATASET_NAME, OUTPUT_ROOT, RUN_NAME
   START_INDEX, END_INDEX, MAX_SAMPLES, SAMPLE_INDICES, SAMPLE_INDICES_FILE
-  ATTACK_ONLY_CLEAN_CORRECT
+  ATTACK_ONLY_CLEAN_CORRECT, CLEAN_CORRECT_SAMPLE_SIZE
+  CLEAN_CORRECT_SAMPLE_SEED
   IMAGE_SIZE, BATCHSIZE, VICTIM_MODEL, DEVICE, CLASSIFIER_OBJECTIVE
   ATTACK_MODE, PROMPT, GCG_WORD, GCG_OCCURRENCE, GCG_STEPS
   GCG_BATCH_SIZE, MAX_VICTIM_QUERIES, MODEL_PATH, CLASS_ABLATION
+  STRATEGY_MLLM_MODE
   GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS, GCG_EVAL_NATURALNESS_LLM_THINKING
   HEIGHT, WIDTH, NUM_INFERENCE_STEPS, MAX_SEQUENCE_LENGTH
   GUIDANCE_SCALE, CPU_OFFLOAD
@@ -603,6 +627,7 @@ CMD=(
   --run_name "$RUN_NAME"
   --start_index "$START_INDEX"
   --attack_only_clean_correct "$ATTACK_ONLY_CLEAN_CORRECT"
+  --clean_correct_sample_size "$CLEAN_CORRECT_SAMPLE_SIZE"
   --image_size "$IMAGE_SIZE"
   --batchsize "$BATCHSIZE"
   --victim_model "$VICTIM_MODEL"
@@ -620,6 +645,7 @@ CMD=(
   --gcg_scene_vocab_prompts_per_strategy "$GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY"
   --gcg_scene_vocab_enabled_strategies "$GCG_SCENE_VOCAB_ENABLED_STRATEGIES"
   --gcg_slot_candidate_max_words "$GCG_SLOT_CANDIDATE_MAX_WORDS"
+  --strategy_mllm_mode "$STRATEGY_MLLM_MODE"
   --class_ablation "$CLASS_ABLATION"
   --gcg_candidate_source "$GCG_CANDIDATE_SOURCE"
   --gcg_scene_feedback_limit "$GCG_SCENE_FEEDBACK_LIMIT"
@@ -639,6 +665,7 @@ else
 fi
 [[ -n "$SAMPLE_INDICES" ]] && CMD+=(--sample_indices "$SAMPLE_INDICES")
 [[ -n "$SAMPLE_INDICES_FILE" ]] && CMD+=(--sample_indices_file "$SAMPLE_INDICES_FILE")
+[[ -n "$CLEAN_CORRECT_SAMPLE_SEED" ]] && CMD+=(--clean_correct_sample_seed "$CLEAN_CORRECT_SAMPLE_SEED")
 [[ -n "$MANUAL_SEED" ]] && CMD+=(--manual_seed "$MANUAL_SEED")
 [[ -n "$HEIGHT" ]] && CMD+=(--height "$HEIGHT")
 [[ -n "$WIDTH" ]] && CMD+=(--width "$WIDTH")
