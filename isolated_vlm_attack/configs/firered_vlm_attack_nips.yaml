@@ -1,0 +1,87 @@
+# FireRed-Image-Edit-1.1 isolated black-box VLM attack preset.
+# Usage:
+#   CONFIG=configs/firered_vlm_attack_nips.yaml ./run_vlm_attack.sh
+#   ./run_vlm_attack.sh --config configs/firered_vlm_attack_nips.yaml --attack_mode and
+
+# Match the FLUX preset schema: the YAML selects the concrete runner directly.
+script_path: firered_attack_runner.py
+# cuda_visible_devices: "4"
+hf_token_env: HF_TOKEN
+dataset_root: data/nips2017
+output_root: outputs
+wandb_enable: false
+
+run_args:
+  attack_mode: vlm
+  dataset_root: data/nips2017
+  dataset_name: nips2017
+  output_root: outputs
+  victim_model: resnet50
+  run_name: auto
+  wandb_project: firered_image_edit_attack
+  start_index: 0
+  max_samples: 1000
+  attack_only_clean_correct: false
+  clean_correct_sample_size: 0
+
+  device: cuda
+  batchsize: 1
+  image_size: 224
+  saved_image_size: 224
+  classifier_objective: logit_margin_max
+
+  # FireRed's official non-optimized inference defaults.
+  model_path: FireRedTeam/FireRed-Image-Edit-1.1
+  manual_seed: 49
+  num_inference_steps: 40
+  firered_true_cfg_scale: 4.0
+  firered_negative_prompt: " "
+  firered_num_images_per_prompt: 1
+  firered_batch_size: 1
+  firered_batch_fallback: true
+  cpu_offload: false
+  max_sequence_length: 512
+  # FireRed uses true CFG; guidance_scale is intentionally omitted.
+
+  # The attack runner normalizes the square NIPS condition image to the
+  # QwenImageEditPlusPipeline's approximately one-megapixel working size.
+  height: 1024
+  width: 1024
+
+  prompt: "a photo of <class> in the background"
+  gcg_word: background
+  gcg_occurrence: 0
+  gcg_steps: 50
+  gcg_batch_size: 3
+  max_victim_queries: 100
+  gcg_candidate_source: gemma_scene_vocab
+  gcg_scene_vocab_size: 3
+  gcg_scene_vocab_prompts_per_strategy: 1
+  gcg_scene_vocab_enabled_strategies: all
+  gcg_slot_candidate_max_words: 5
+  gcg_scene_vocab_feedback: true
+  gcg_scene_feedback_limit: 1000
+  strategy_mllm_mode: configured
+  class_ablation: false
+  scene_fallback: outdoor
+
+  wandb_mode: auto
+  wandb_log_every: 1
+
+  # Explicit VLM/LLM settings keep this preset independent of launcher defaults.
+  scene_vlm_backend: gemma4
+  scene_vlm_model_id: google/gemma-4-E4B-it
+  scene_vlm_device: auto
+  scene_vlm_max_new_tokens: 4096
+  scene_vlm_thinking: false
+  scene_vlm_do_sample: false
+  gcg_scene_llm_backend: gemma4
+  gcg_scene_llm_model_id: google/gemma-4-E4B-it
+  gcg_scene_llm_device: auto
+  gcg_scene_llm_max_new_tokens: 4096
+  gcg_scene_llm_thinking: false
+  gcg_scene_llm_do_sample: false
+
+  gcg_early_stop_on_attack_success: true
+  gcg_eval_naturalness_on_attack_success: true
+  gcg_eval_naturalness_llm_thinking: false

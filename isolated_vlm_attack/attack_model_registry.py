@@ -10,6 +10,7 @@ FLUX2_KLEIN_MODEL_IDS = (
     "black-forest-labs/FLUX.2-klein-9b-kv",
 )
 QWEN_IMAGE_EDIT_MODEL_IDS = ("Qwen/Qwen-Image-Edit-2511",)
+FIRERED_IMAGE_EDIT_MODEL_IDS = ("FireRedTeam/FireRed-Image-Edit-1.1",)
 BERNINI_MODEL_ID = "bernini"
 
 
@@ -27,15 +28,23 @@ def validate_generator_model(
     token = _normalized_model_id(model_path)
     flux_ids = {_normalized_model_id(value) for value in FLUX2_KLEIN_MODEL_IDS}
     qwen_ids = {_normalized_model_id(value) for value in QWEN_IMAGE_EDIT_MODEL_IDS}
+    firered_ids = {_normalized_model_id(value) for value in FIRERED_IMAGE_EDIT_MODEL_IDS}
     if token in flux_ids:
         family = "flux2-klein"
     elif token in qwen_ids:
         family = "qwen-image-edit"
+    elif token in firered_ids:
+        family = "firered-image-edit"
     elif token == BERNINI_MODEL_ID:
         family = "bernini"
     else:
         allowed = ", ".join(
-            [*FLUX2_KLEIN_MODEL_IDS, *QWEN_IMAGE_EDIT_MODEL_IDS, BERNINI_MODEL_ID]
+            [
+                *FLUX2_KLEIN_MODEL_IDS,
+                *QWEN_IMAGE_EDIT_MODEL_IDS,
+                *FIRERED_IMAGE_EDIT_MODEL_IDS,
+                BERNINI_MODEL_ID,
+            ]
         )
         raise ValueError(f"unsupported generator model_path={model_path!r}; allowed: {allowed}")
 

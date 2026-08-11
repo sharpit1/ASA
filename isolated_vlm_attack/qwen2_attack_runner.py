@@ -3,10 +3,11 @@ import json
 import tempfile
 import time
 import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from PIL import Image
 
@@ -37,6 +38,38 @@ from attack_runner_common import (
     sample_clean_correct_indices,
     select_clean_correct_indices,
     validate_passthrough_core_args,
+)
+
+
+@dataclass(frozen=True)
+class ImageEditRunnerProfile:
+    display_name: str
+    model_id: str
+    model_family: str
+    option_prefix: str
+    process_title_backend: str
+    run_name_prefix: str
+    runner_script: str
+    log_name: str
+    temp_prefix: str
+    runtime_factory: Callable[[], object]
+    default_manual_seed: Optional[int] = None
+    default_num_inference_steps: Optional[int] = None
+    default_height: Optional[int] = None
+    default_width: Optional[int] = None
+
+
+QWEN_RUNNER_PROFILE = ImageEditRunnerProfile(
+    display_name="Qwen Image Edit 2511",
+    model_id="Qwen/Qwen-Image-Edit-2511",
+    model_family="qwen-image-edit",
+    option_prefix="qwen",
+    process_title_backend="qwenEdit",
+    run_name_prefix="qwen2_run",
+    runner_script="qwen2_attack_runner.py",
+    log_name="qwen2_runner",
+    temp_prefix="qwen2_attack_input_",
+    runtime_factory=Qwen2AttackRuntimeAdapter,
 )
 
 
@@ -77,6 +110,8 @@ def add_total_elapsed_to_report(
     report_path: Path,
     total_elapsed_seconds: float,
     image_save_elapsed_seconds: float,
+    *,
+    log_name: str = "qwen2_runner",
 ) -> None:
     try:
         payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
@@ -87,7 +122,7 @@ def add_total_elapsed_to_report(
         Path(report_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         print(
-            "[qwen2_runner] WARNING: failed to add timing fields to report "
+            f"[{log_name}] WARNING: failed to add timing fields to report "
             f"{report_path}: {type(exc).__name__}: {exc}"
         )
 
@@ -223,9 +258,7 @@ def _collect_report_runtime_errors(value, path="$"):
             found.extend(_collect_report_runtime_errors(item, item_path))
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            found.extend(
-                _collect_report_runtime_errors(item, f"{path}[{index}]")
-            )
+            found.extend(_collect_report_runtime_errors(item, f"{path}[{index}]"))
     return found
 
 
@@ -310,12 +343,8 @@ def load_resumable_report(
             return None
         if int(entry.get("strategy_slot_count", 0) or 0) != expected_slot_count:
             return None
-        duplicate_count = int(
-            entry.get("strategy_duplicate_skipped_count", 0) or 0
-        )
-        duplicate_queries = int(
-            entry.get("strategy_duplicate_query_count", 0) or 0
-        )
+        duplicate_count = int(entry.get("strategy_duplicate_skipped_count", 0) or 0)
+        duplicate_queries = int(entry.get("strategy_duplicate_query_count", 0) or 0)
         if duplicate_queries != duplicate_count:
             return None
     if strategy_steps == 0:
@@ -366,28 +395,56 @@ def build_resume_validation_config(cfg, passthrough_core_args):
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_image_edit_parser(profile: ImageEditRunnerProfile) -> argparse.ArgumentParser:
     parser = base_build_parser()
-    parser.description = "Qwen Image Edit 2511 black-box attack runner."
+    parser.description = f"{profile.display_name} black-box attack runner."
     parser.set_defaults(gcg_candidate_source="gemma_scene_vocab")
-    parser.add_argument("--model_path", type=str, default="Qwen/Qwen-Image-Edit-2511")
+    runner_defaults = {}
+    if profile.default_manual_seed is not None:
+        runner_defaults["manual_seed"] = int(profile.default_manual_seed)
+    if profile.default_num_inference_steps is not None:
+        runner_defaults["num_inference_steps"] = int(profile.default_num_inference_steps)
+    if profile.default_height is not None:
+        runner_defaults["height"] = int(profile.default_height)
+    if profile.default_width is not None:
+        runner_defaults["width"] = int(profile.default_width)
+    if runner_defaults:
+        parser.set_defaults(**runner_defaults)
+    parser.add_argument("--model_path", type=str, default=profile.model_id)
     parser.add_argument("--max_sequence_length", type=int, default=512)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--cpu_offload", type=parse_bool_flag, default=False)
-    parser.add_argument("--qwen_true_cfg_scale", type=float, default=4.0)
-    parser.add_argument("--qwen_negative_prompt", type=str, default=" ")
-    parser.add_argument("--qwen_num_images_per_prompt", type=int, choices=[1], default=1)
+    option_prefix = profile.option_prefix
     parser.add_argument(
-        "--qwen_batch_size",
+        f"--{option_prefix}_true_cfg_scale",
+        type=float,
+        default=4.0,
+    )
+    parser.add_argument(
+        f"--{option_prefix}_negative_prompt",
+        type=str,
+        default=" ",
+    )
+    parser.add_argument(
+        f"--{option_prefix}_num_images_per_prompt",
+        type=int,
+        choices=[1],
+        default=1,
+    )
+    parser.add_argument(
+        f"--{option_prefix}_batch_size",
         type=int,
         default=1,
         help="Experimental single-GPU prompt batch size; 1 keeps upstream sequential inference.",
     )
     parser.add_argument(
-        "--qwen_batch_fallback",
+        f"--{option_prefix}_batch_fallback",
         type=parse_bool_flag,
         default=True,
-        help="Fall back to sequential Qwen rendering if experimental batching fails.",
+        help=(
+            f"Fall back to sequential {profile.display_name} rendering if "
+            "experimental batching fails."
+        ),
     )
     parser.add_argument(
         "--clean_correct_skip",
@@ -409,33 +466,81 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def normalize_qwen_attack_mode(raw: object) -> str:
+def build_parser() -> argparse.ArgumentParser:
+    return build_image_edit_parser(QWEN_RUNNER_PROFILE)
+
+
+def normalize_image_edit_attack_mode(
+    raw: object,
+    *,
+    profile: ImageEditRunnerProfile,
+) -> str:
     token = str(raw or "vlm").strip().lower()
     if token not in {"vlm", "and"}:
-        raise ValueError("Qwen Image Edit runner supports attack_mode=vlm or and.")
+        raise ValueError(f"{profile.display_name} runner supports attack_mode=vlm or and.")
     return token
 
 
-def configure_qwen_attack_mode(cfg: argparse.Namespace) -> None:
-    cfg.attack_mode = normalize_qwen_attack_mode(getattr(cfg, "attack_mode", "vlm"))
+def normalize_qwen_attack_mode(raw: object) -> str:
+    return normalize_image_edit_attack_mode(raw, profile=QWEN_RUNNER_PROFILE)
+
+
+def configure_image_edit_attack_mode(
+    cfg: argparse.Namespace,
+    *,
+    profile: ImageEditRunnerProfile,
+) -> None:
+    cfg.attack_mode = normalize_image_edit_attack_mode(
+        getattr(cfg, "attack_mode", "vlm"),
+        profile=profile,
+    )
     configure_attack_mode(cfg)
-    cfg.qwen_attack_mode = cfg.attack_mode
+    setattr(cfg, f"{profile.option_prefix}_attack_mode", cfg.attack_mode)
+
+
+def configure_qwen_attack_mode(cfg: argparse.Namespace) -> None:
+    configure_image_edit_attack_mode(cfg, profile=QWEN_RUNNER_PROFILE)
+
+
+def apply_image_edit_runtime_args(
+    core_args: argparse.Namespace,
+    cfg: argparse.Namespace,
+    *,
+    profile: ImageEditRunnerProfile,
+) -> None:
+    option_prefix = profile.option_prefix
+    core_args.cpu_offload = bool(getattr(cfg, "cpu_offload", False))
+    for suffix, default, converter in (
+        ("true_cfg_scale", 4.0, float),
+        ("negative_prompt", " ", str),
+        ("num_images_per_prompt", 1, int),
+        ("batch_size", 1, int),
+        ("batch_fallback", True, bool),
+    ):
+        option_name = f"{option_prefix}_{suffix}"
+        raw_value = getattr(cfg, option_name, default)
+        if suffix == "negative_prompt":
+            raw_value = raw_value or " "
+        setattr(core_args, option_name, converter(raw_value))
+    core_args.gcg_skip_initial_render = True
+
+    attack_mode = str(
+        getattr(cfg, f"{option_prefix}_attack_mode", "vlm") or "vlm"
+    ).strip().lower()
+    setattr(core_args, f"{option_prefix}_attack_mode", attack_mode)
+    # The attack core's edit-instruction and AND gates retain their historical
+    # Qwen names because both backends use QwenImageEditPlusPipeline semantics.
+    core_args.qwen_edit_prompt_mode = True
+    core_args.qwen_strategy_and_enable = bool(attack_mode == "and")
+    core_args.attack_mode = attack_mode
 
 
 def apply_qwen_runtime_args(core_args: argparse.Namespace, cfg: argparse.Namespace) -> None:
-    core_args.cpu_offload = bool(getattr(cfg, "cpu_offload", False))
-    core_args.qwen_true_cfg_scale = float(getattr(cfg, "qwen_true_cfg_scale", 4.0))
-    core_args.qwen_negative_prompt = str(getattr(cfg, "qwen_negative_prompt", " ") or " ")
-    core_args.qwen_num_images_per_prompt = int(getattr(cfg, "qwen_num_images_per_prompt", 1))
-    core_args.qwen_batch_size = int(getattr(cfg, "qwen_batch_size", 1))
-    core_args.qwen_batch_fallback = bool(getattr(cfg, "qwen_batch_fallback", True))
-    core_args.gcg_skip_initial_render = True
-
-    qwen_attack_mode = str(getattr(cfg, "qwen_attack_mode", "vlm") or "vlm").strip().lower()
-    core_args.qwen_attack_mode = qwen_attack_mode
-    core_args.qwen_edit_prompt_mode = True
-    core_args.qwen_strategy_and_enable = bool(qwen_attack_mode == "and")
-    core_args.attack_mode = qwen_attack_mode
+    apply_image_edit_runtime_args(
+        core_args,
+        cfg,
+        profile=QWEN_RUNNER_PROFILE,
+    )
 
 
 def build_core_cli(
@@ -483,22 +588,34 @@ def parse_qwen_core_args(
     return core_args, core_unknown
 
 
-def main() -> int:
-    parser = build_parser()
+def parse_image_edit_core_args(
+    *,
+    cfg: argparse.Namespace,
+    passthrough_core_args: Sequence[str],
+    core_cli: Sequence[str],
+    profile: ImageEditRunnerProfile,
+):
+    core_args, core_unknown = parse_core_args([*list(core_cli), *list(passthrough_core_args)])
+    apply_image_edit_runtime_args(core_args, cfg, profile=profile)
+    return core_args, core_unknown
+
+
+def run_image_edit_attack(profile: ImageEditRunnerProfile) -> int:
+    parser = build_image_edit_parser(profile)
     cfg, passthrough_core_args = parser.parse_known_args()
     validate_passthrough_core_args(passthrough_core_args)
-    configure_qwen_attack_mode(cfg)
+    configure_image_edit_attack_mode(cfg, profile=profile)
     resume_validation_cfg = (
         build_resume_validation_config(cfg, passthrough_core_args)
         if bool(cfg.resume_existing_reports)
         else None
     )
 
-    validate_generator_model(cfg.model_path, expected_family="qwen-image-edit")
+    validate_generator_model(cfg.model_path, expected_family=profile.model_family)
 
     cfg.classifier_mode = "black-box"
     cfg.classifier_name = str(cfg.victim_model)
-    cfg.process_title_backend = "qwenEdit"
+    cfg.process_title_backend = profile.process_title_backend
     set_process_title_from_args(cfg)
 
     if cfg.manual_seed is not None:
@@ -506,7 +623,9 @@ def main() -> int:
 
     hf_token = resolve_optional_hf_token(cfg.hf_token)
     sensitive_values = collect_sensitive_values(hf_token, cfg.wandb_api_key)
-    run_name = str(cfg.run_name or "").strip() or datetime.now().strftime("qwen2_run_%Y%m%d_%H%M%S")
+    run_name = str(cfg.run_name or "").strip() or datetime.now().strftime(
+        f"{profile.run_name_prefix}_%Y%m%d_%H%M%S"
+    )
     cfg.run_name = run_name
     if int(cfg.height) <= 0:
         cfg.height = int(cfg.image_size)
@@ -514,10 +633,12 @@ def main() -> int:
         cfg.width = int(cfg.image_size)
     if int(cfg.max_sequence_length) < 1:
         raise ValueError("--max_sequence_length must be >= 1")
-    if int(cfg.qwen_num_images_per_prompt) != 1:
-        raise ValueError("--qwen_num_images_per_prompt is fixed at 1")
-    if int(cfg.qwen_batch_size) < 1:
-        raise ValueError("--qwen_batch_size must be >= 1")
+    image_count_name = f"{profile.option_prefix}_num_images_per_prompt"
+    batch_size_name = f"{profile.option_prefix}_batch_size"
+    if int(getattr(cfg, image_count_name)) != 1:
+        raise ValueError(f"--{image_count_name} is fixed at 1")
+    if int(getattr(cfg, batch_size_name)) < 1:
+        raise ValueError(f"--{batch_size_name} must be >= 1")
     if int(cfg.clean_correct_skip) < 0:
         raise ValueError("--clean_correct_skip must be >= 0")
     if int(cfg.clean_correct_count) < 0:
@@ -578,7 +699,10 @@ def main() -> int:
                 "sample_indices selected no samples inside "
                 f"start_index={start_index}, end_index={end_index}"
             )
-        print(f"[qwen2_runner] sample_indices selected={len(selected_in_range)} file={cfg.sample_indices_file or ''}")
+        print(
+            f"[{profile.log_name}] sample_indices selected={len(selected_in_range)} "
+            f"file={cfg.sample_indices_file or ''}"
+        )
 
     run_root = resolve_run_root(cfg, run_name)
     run_root.mkdir(parents=True, exist_ok=True)
@@ -658,7 +782,7 @@ def main() -> int:
             item.get("status") == "error" for item in clean_filter_results
         )
         print(
-            "[qwen2_runner] clean filter "
+            f"[{profile.log_name}] clean filter "
             f"examined={len(clean_filter_results)} passed={clean_filter_passed_count} "
             f"selected={len(attack_indices)} "
             f"incorrect_or_missing={len(clean_filter_results) - clean_filter_passed_count} "
@@ -668,7 +792,7 @@ def main() -> int:
         )
         if clean_correct_sample_size > 0:
             print(
-                "[qwen2_runner] clean-correct sample "
+                f"[{profile.log_name}] clean-correct sample "
                 f"pool={len(clean_correct_pool_indices)} "
                 f"selected={len(attack_indices)} "
                 f"seed={int(clean_correct_sample_seed)}"
@@ -680,7 +804,7 @@ def main() -> int:
     attack_success_count = 0
     attack_failure_count = 0
     attack_unknown_count = 0
-    runtime = Qwen2AttackRuntimeAdapter()
+    runtime = profile.runtime_factory()
     try:
         stop_requested = False
         for batch_idx, (image_id_batch, label_ori_batch, label_tar_batch) in enumerate(data_loader):
@@ -727,12 +851,15 @@ def main() -> int:
                         else:
                             attack_failure_count += 1
                         print(
-                            f"[qwen2_runner] resume sample {idx:04d} "
+                            f"[{profile.log_name}] resume sample {idx:04d} "
                             "from verified existing report"
                         )
                         continue
 
-                print(f"[qwen2_runner] sample {idx:04d} image_id={image_id} label={true_label}")
+                print(
+                    f"[{profile.log_name}] sample {idx:04d} "
+                    f"image_id={image_id} label={true_label}"
+                )
                 sample_dir.mkdir(parents=True, exist_ok=True)
                 if output_path.is_file():
                     output_path.unlink()
@@ -757,7 +884,7 @@ def main() -> int:
                 try:
                     image_save_timer.start()
                     victim.set_label(true_label)
-                    with tempfile.TemporaryDirectory(prefix="qwen2_attack_input_") as temp_dir:
+                    with tempfile.TemporaryDirectory(prefix=profile.temp_prefix) as temp_dir:
                         qwen_input_path = Path(temp_dir) / "condition.png"
                         transient_input_paths = [temp_dir, qwen_input_path]
                         prepare_model_input(
@@ -776,10 +903,11 @@ def main() -> int:
                             sample_target_label=target_label,
                             sample_run_name=sample_run_name,
                         )
-                        core_args, core_unknown = parse_qwen_core_args(
+                        core_args, core_unknown = parse_image_edit_core_args(
                             cfg=cfg,
                             passthrough_core_args=passthrough_core_args,
                             core_cli=core_cli,
+                            profile=profile,
                         )
                         runtime.setup(
                             args=core_args,
@@ -799,6 +927,7 @@ def main() -> int:
                         report_path,
                         total_elapsed_seconds,
                         image_save_timer.elapsed_seconds,
+                        log_name=profile.log_name,
                     )
                     result["sample_index"] = int(idx)
                     result["image_id"] = image_id
@@ -858,7 +987,10 @@ def main() -> int:
                                     fail_payload[key] = partial_report[key]
                     report_path.write_text(json.dumps(fail_payload, ensure_ascii=False, indent=2), encoding="utf-8")
                     results.append(fail_payload)
-                    print(f"[qwen2_runner] sample {idx:04d} failed: {type(exc).__name__}: {safe_error}")
+                    print(
+                        f"[{profile.log_name}] sample {idx:04d} failed: "
+                        f"{type(exc).__name__}: {safe_error}"
+                    )
                 finally:
                     image_save_timer.stop()
             if stop_requested:
@@ -871,11 +1003,17 @@ def main() -> int:
         "dataset_root": str(dataset_root),
         "dataset_name": str(cfg.dataset_name),
         "victim_model": str(cfg.victim_model),
-        "runner": "qwen2_attack_runner.py",
+        "runner": profile.runner_script,
         "model_path": str(cfg.model_path),
-        "qwen_attack_mode": str(getattr(cfg, "qwen_attack_mode", "vlm")),
-        "qwen_batch_size": int(getattr(cfg, "qwen_batch_size", 1)),
-        "qwen_batch_fallback": bool(getattr(cfg, "qwen_batch_fallback", True)),
+        f"{profile.option_prefix}_attack_mode": str(
+            getattr(cfg, f"{profile.option_prefix}_attack_mode", "vlm")
+        ),
+        f"{profile.option_prefix}_batch_size": int(
+            getattr(cfg, f"{profile.option_prefix}_batch_size", 1)
+        ),
+        f"{profile.option_prefix}_batch_fallback": bool(
+            getattr(cfg, f"{profile.option_prefix}_batch_fallback", True)
+        ),
         "run_name": run_name,
         "start_index": int(start_index),
         "end_index": int(end_index),
@@ -936,17 +1074,17 @@ def main() -> int:
     summary_path = run_root / "run_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
-    print("[qwen2_runner] completed")
-    print(f"[qwen2_runner] run_root={run_root}")
-    print(f"[qwen2_runner] summary={summary_path}")
-    print(f"[qwen2_runner] success={success_count} fail={fail_count}")
+    print(f"[{profile.log_name}] completed")
+    print(f"[{profile.log_name}] run_root={run_root}")
+    print(f"[{profile.log_name}] summary={summary_path}")
+    print(f"[{profile.log_name}] success={success_count} fail={fail_count}")
     print(
-        "[qwen2_runner] attack_success="
+        f"[{profile.log_name}] attack_success="
         f"{query_metrics['attack_success_count']}/{len(results)} "
         f"rate={query_metrics['attack_success_rate_percent']:.2f}%"
     )
     print(
-        "[qwen2_runner] victim_query_mean "
+        f"[{profile.log_name}] victim_query_mean "
         "successful_attacks="
         f"{_format_query_mean(query_metrics['successful_attack_query_mean'])} "
         f"(recorded={query_metrics['successful_attack_query_count_recorded']}/"
@@ -956,6 +1094,10 @@ def main() -> int:
         f"(recorded={query_metrics['all_sample_query_count_recorded']}/{len(results)})"
     )
     return 0 if fail_count == 0 and summary["clean_filter_error_count"] == 0 else 1
+
+
+def main() -> int:
+    return run_image_edit_attack(QWEN_RUNNER_PROFILE)
 
 
 if __name__ == "__main__":

@@ -21,8 +21,10 @@ import yaml
 from PIL import Image
 
 import bernini_attack_runner as bernini_runner
+import firered_attack_runner as firered_runner
 import qwen2_attack_runner as qwen_runner
 from attack_model_registry import (
+    FIRERED_IMAGE_EDIT_MODEL_IDS,
     FLUX2_KLEIN_MODEL_IDS,
     QWEN_IMAGE_EDIT_MODEL_IDS,
     validate_generator_model,
@@ -53,6 +55,7 @@ from flux2_attack_runner import (
     build_resume_validation_config,
     load_resumable_report,
 )
+from firered_blackbox_runtime import FireRedImageEditRenderSession
 from qwen2_attack_runner import (
     apply_qwen_runtime_args,
     build_parser as build_qwen_runner_parser,
@@ -2031,6 +2034,33 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertEqual(selected_args.clean_correct_sample_size, 100)
         self.assertEqual(selected_args.clean_correct_sample_seed, 7)
 
+    def test_firered_runner_defaults_and_clean_correct_options(self) -> None:
+        default_args = firered_runner.build_parser().parse_args([])
+        selected_args = firered_runner.build_parser().parse_args(
+            [
+                "--attack_only_clean_correct",
+                "true",
+                "--clean_correct_skip",
+                "200",
+                "--clean_correct_count",
+                "100",
+            ]
+        )
+
+        self.assertEqual(
+            default_args.model_path,
+            "FireRedTeam/FireRed-Image-Edit-1.1",
+        )
+        self.assertEqual(default_args.manual_seed, 49)
+        self.assertEqual(default_args.num_inference_steps, 40)
+        self.assertEqual(default_args.height, 1024)
+        self.assertEqual(default_args.width, 1024)
+        self.assertEqual(default_args.firered_true_cfg_scale, 4.0)
+        self.assertEqual(default_args.firered_negative_prompt, " ")
+        self.assertEqual(default_args.firered_batch_size, 1)
+        self.assertEqual(selected_args.clean_correct_skip, 200)
+        self.assertEqual(selected_args.clean_correct_count, 100)
+
     def test_qwen_clean_correct_window_preserves_candidate_file_order(self) -> None:
         selected = qwen_runner.slice_clean_correct_indices(
             candidate_indices=[8, 3, 5, 1, 9, 2],
@@ -2616,6 +2646,39 @@ class AttackModeRefactorTests(unittest.TestCase):
             launcher,
         )
 
+    def test_firered_faas_launchers_use_requested_modes_and_full_selection(self) -> None:
+        bootstrap = (
+            ISOLATED_ROOT / "run_firered_vlm_res_remote.sh"
+        ).read_text(encoding="utf-8")
+        smoke = (
+            ISOLATED_ROOT / "run_firered_vlm_res_smoke.sh"
+        ).read_text(encoding="utf-8")
+        vlm_none = (
+            ISOLATED_ROOT / "run_firered_vlm_res_clean_correct_full_vlm_none.sh"
+        ).read_text(encoding="utf-8")
+        and_all = (
+            ISOLATED_ROOT / "run_firered_vlm_res_clean_correct_full_and_all.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("requirements-faas.txt", bootstrap)
+        self.assertIn("FireRedTeam/FireRed-Image-Edit-1.1", bootstrap)
+        self.assertIn("google/gemma-4-E4B-it", bootstrap)
+        self.assertNotIn("python -m venv", bootstrap)
+
+        self.assertIn("--max_samples 1", smoke)
+        self.assertIn("--attack_only_clean_correct false", smoke)
+        self.assertIn("--attack_mode vlm", smoke)
+        self.assertIn("--gcg_scene_vocab_enabled_strategies none", smoke)
+
+        for launcher in (vlm_none, and_all):
+            self.assertIn("--attack_only_clean_correct true", launcher)
+            self.assertIn("--clean_correct_sample_size 0", launcher)
+            self.assertIn("/app/output/sharpit1", launcher)
+        self.assertIn("--attack_mode vlm", vlm_none)
+        self.assertIn("--gcg_scene_vocab_enabled_strategies none", vlm_none)
+        self.assertIn("--attack_mode and", and_all)
+        self.assertIn("--gcg_scene_vocab_enabled_strategies all", and_all)
+
     def test_qwen_launcher_forwards_clean_correct_window_options(self) -> None:
         launcher = (ISOLATED_ROOT / "run_vlm_attack.sh").read_text(encoding="utf-8")
 
@@ -2659,7 +2722,7 @@ class AttackModeRefactorTests(unittest.TestCase):
             launcher.count(
                 'CMD+=(--clean_correct_sample_seed "$CLEAN_CORRECT_SAMPLE_SEED")'
             ),
-            2,
+            3,
         )
 
     def test_qwen_seeded_clean100_launcher_samples_from_all_candidates(self) -> None:
@@ -3016,6 +3079,37 @@ class AttackModeRefactorTests(unittest.TestCase):
                 else:
                     self.assertNotIn("guidance_scale", session.pipe.call_kwargs)
 
+    def test_firered_pipeline_never_passes_guidance_scale(self) -> None:
+        class FakePipeline:
+            def __init__(self):
+                self.call_kwargs = None
+
+            def __call__(self, **kwargs):
+                self.call_kwargs = dict(kwargs)
+                return SimpleNamespace(images=[Image.new("RGB", (8, 8), "white")])
+
+        session = object.__new__(FireRedImageEditRenderSession)
+        session.args = SimpleNamespace(
+            device="cpu",
+            firered_true_cfg_scale=4.0,
+            firered_negative_prompt=" ",
+            firered_num_images_per_prompt=1,
+            num_inference_steps=40,
+            max_sequence_length=512,
+            guidance_scale=9.5,
+        )
+        session.pipe = FakePipeline()
+
+        image = session._pipe_call(
+            prompt="test prompt",
+            image=Image.new("RGB", (8, 8), "black"),
+            seed=49,
+        )
+
+        self.assertEqual(image.size, (8, 8))
+        self.assertEqual(session.pipe.call_kwargs["true_cfg_scale"], 4.0)
+        self.assertNotIn("guidance_scale", session.pipe.call_kwargs)
+
     def test_qwen_render_batches_distinct_prompts_and_preserves_seed_order(self) -> None:
         session = object.__new__(QwenImageEditRenderSession)
         session.args = SimpleNamespace(
@@ -3130,11 +3224,12 @@ class AttackModeRefactorTests(unittest.TestCase):
             "flux2_and_attack_nips*.yaml",
             "qwen_edit_vlm_*.yaml",
             "qwen_edit_and_*.yaml",
+            "firered_vlm_attack_nips*.yaml",
             "bernini_vlm_attack_nips*.yaml",
             "bernini_and_attack_nips*.yaml",
         )
         paths = sorted({path for pattern in patterns for path in config_root.glob(pattern)})
-        self.assertEqual(len(paths), 34)
+        self.assertEqual(len(paths), 36)
 
         forbidden_exact = {
             "inversion_prompt",
@@ -3165,6 +3260,15 @@ class AttackModeRefactorTests(unittest.TestCase):
                     validate_generator_model(
                         run_args.get("model_path"),
                         expected_family="qwen-image-edit",
+                    )
+                elif path.name.startswith("firered_"):
+                    self.assertEqual(
+                        config.get("script_path"),
+                        "firered_attack_runner.py",
+                    )
+                    validate_generator_model(
+                        run_args.get("model_path"),
+                        expected_family="firered-image-edit",
                     )
                 else:
                     self.assertEqual(config.get("script_path"), "bernini_attack_runner.py")
@@ -3347,6 +3451,12 @@ class AttackModeRefactorTests(unittest.TestCase):
                     validate_generator_model(model_id, expected_family="qwen-image-edit"),
                     "qwen-image-edit",
                 )
+        for model_id in FIRERED_IMAGE_EDIT_MODEL_IDS:
+            with self.subTest(model_id=model_id):
+                self.assertEqual(
+                    validate_generator_model(model_id, expected_family="firered-image-edit"),
+                    "firered-image-edit",
+                )
         self.assertEqual(
             validate_generator_model("bernini", expected_family="bernini"),
             "bernini",
@@ -3355,6 +3465,7 @@ class AttackModeRefactorTests(unittest.TestCase):
         for lookalike in (
             "attacker/flux2-klein-backdoor",
             "attacker/qwen-image-edit-backdoor",
+            "attacker/firered-image-edit-backdoor",
             "bernini-v2",
         ):
             with self.subTest(lookalike=lookalike):

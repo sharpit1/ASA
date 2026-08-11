@@ -45,12 +45,22 @@ def _safe_float(value: object, default: float = float("-inf")) -> float:
 
 
 class QwenImageEditRenderSession:
+    MODEL_ID = "Qwen/Qwen-Image-Edit-2511"
+    MODEL_FAMILY = "qwen-image-edit"
+    DISPLAY_NAME = "Qwen Image Edit"
+    OPTION_PREFIX = "qwen"
+    ERROR_PREFIX = "qwen"
+    PASS_GUIDANCE_SCALE = True
+
     def __init__(self, *, args, has_input_image: bool):
         self.args = args
         self.has_input_image = bool(has_input_image)
         self.pipe = None
         self.last_and_query_count = 0
         self._load_pipeline()
+
+    def _option(self, suffix: str, default):
+        return getattr(self.args, f"{self.OPTION_PREFIX}_{suffix}", default)
 
     def _device(self) -> str:
         requested = str(getattr(self.args, "device", "cuda") or "cuda").strip()
@@ -61,15 +71,15 @@ class QwenImageEditRenderSession:
     def _load_pipeline(self) -> None:
         model_path = str(getattr(self.args, "model_path", "") or "").strip()
         if not model_path:
-            model_path = "Qwen/Qwen-Image-Edit-2511"
-        validate_generator_model(model_path, expected_family="qwen-image-edit")
+            model_path = self.MODEL_ID
+        validate_generator_model(model_path, expected_family=self.MODEL_FAMILY)
 
         try:
             from diffusers import QwenImageEditPlusPipeline
         except Exception as exc:
             raise ImportError(
-                "QwenImageEditPlusPipeline is required for Qwen-Image-Edit-2511. "
-                "Install a recent diffusers build, e.g. `pip install git+https://github.com/huggingface/diffusers`."
+                f"QwenImageEditPlusPipeline is required for {self.DISPLAY_NAME}. "
+                "Install diffusers>=0.36.0."
             ) from exc
 
         load_kwargs = {
@@ -93,10 +103,10 @@ class QwenImageEditRenderSession:
 
     def _load_condition_image(self) -> Image.Image:
         if not self.has_input_image:
-            raise ValueError("Qwen Image Edit requires input_img_path.")
+            raise ValueError(f"{self.DISPLAY_NAME} requires input_img_path.")
         raw_path = str(getattr(self.args, "input_img_path", "") or "").strip()
         if not raw_path:
-            raise ValueError("Qwen Image Edit requires input_img_path.")
+            raise ValueError(f"{self.DISPLAY_NAME} requires input_img_path.")
         image_path = Path(raw_path)
         if not image_path.is_file():
             raise FileNotFoundError(f"missing input image: {image_path}")
@@ -109,31 +119,22 @@ class QwenImageEditRenderSession:
         except Exception:
             return torch.Generator().manual_seed(int(seed))
 
-    def _distilled_guidance_scale(self) -> Optional[float]:
-        pipe = self.pipe
-        transformer = getattr(pipe, "transformer", None)
-        config = getattr(transformer, "config", None)
-        if not bool(getattr(config, "guidance_embeds", False)):
-            return None
-        return float(getattr(self.args, "guidance_scale", 1.0))
-
     def _pipe_call(self, *, prompt: str, image: Image.Image, seed: int) -> Image.Image:
         if self.pipe is None:
-            raise RuntimeError("Qwen Image Edit render session is not initialized.")
+            raise RuntimeError(f"{self.DISPLAY_NAME} render session is not initialized.")
 
         kwargs = {
             "image": [image],
             "prompt": str(prompt),
             "generator": self._generator(seed),
-            "true_cfg_scale": float(getattr(self.args, "qwen_true_cfg_scale", 4.0)),
-            "negative_prompt": str(getattr(self.args, "qwen_negative_prompt", " ") or " "),
+            "true_cfg_scale": float(self._option("true_cfg_scale", 4.0)),
+            "negative_prompt": str(self._option("negative_prompt", " ") or " "),
             "num_inference_steps": int(getattr(self.args, "num_inference_steps", 4)),
             "max_sequence_length": int(getattr(self.args, "max_sequence_length", 512)),
-            "num_images_per_prompt": int(getattr(self.args, "qwen_num_images_per_prompt", 1)),
+            "num_images_per_prompt": int(self._option("num_images_per_prompt", 1)),
         }
-        guidance_scale = self._distilled_guidance_scale()
-        if guidance_scale is not None:
-            kwargs["guidance_scale"] = guidance_scale
+        if self.PASS_GUIDANCE_SCALE:
+            kwargs["guidance_scale"] = float(getattr(self.args, "guidance_scale", 1.0))
 
         optional_keys = ["true_cfg_scale", "negative_prompt", "num_images_per_prompt"]
         with torch.inference_mode():
@@ -155,7 +156,7 @@ class QwenImageEditRenderSession:
 
         images = _extract_output_images(output)
         if len(images) == 0:
-            raise RuntimeError("Qwen Image Edit returned no images.")
+            raise RuntimeError(f"{self.DISPLAY_NAME} returned no images.")
         return images[0].convert("RGB")
 
     def _batch_render_supported(self, *, prompt_count: int) -> bool:
@@ -163,7 +164,7 @@ class QwenImageEditRenderSession:
             return False
         if self.pipe is None:
             return False
-        if int(getattr(self.args, "qwen_batch_size", 1)) <= 1:
+        if int(self._option("batch_size", 1)) <= 1:
             return False
         if bool(getattr(self.args, "cpu_offload", False)):
             return False
@@ -177,17 +178,21 @@ class QwenImageEditRenderSession:
         seeds: Sequence[int],
     ) -> List[Image.Image]:
         if self.pipe is None:
-            raise RuntimeError("Qwen Image Edit render session is not initialized.")
+            raise RuntimeError(f"{self.DISPLAY_NAME} render session is not initialized.")
         return render_qwen_image_edit_batch(
             pipe=self.pipe,
             prompts=list(prompts),
             image=image,
             generators=[self._generator(int(seed)) for seed in seeds],
-            true_cfg_scale=float(getattr(self.args, "qwen_true_cfg_scale", 4.0)),
-            negative_prompt=str(getattr(self.args, "qwen_negative_prompt", " ") or " "),
+            true_cfg_scale=float(self._option("true_cfg_scale", 4.0)),
+            negative_prompt=str(self._option("negative_prompt", " ") or " "),
             num_inference_steps=int(getattr(self.args, "num_inference_steps", 4)),
             max_sequence_length=int(getattr(self.args, "max_sequence_length", 512)),
-            guidance_scale=self._distilled_guidance_scale(),
+            guidance_scale=(
+                float(getattr(self.args, "guidance_scale", 1.0))
+                if self.PASS_GUIDANCE_SCALE
+                else None
+            ),
         )
 
     @staticmethod
@@ -206,7 +211,9 @@ class QwenImageEditRenderSession:
         mixed_initial_edit_cache: Optional[Dict[str, object]] = None,
     ) -> List[Image.Image]:
         if mixed_initial_edit_cache is not None:
-            raise ValueError("Qwen Image Edit runtime does not support mixed initial edit caches.")
+            raise ValueError(
+                f"{self.DISPLAY_NAME} runtime does not support mixed initial edit caches."
+            )
         prompt_list = [str(p).strip() for p in prompts if str(p).strip()]
         if len(prompt_list) == 0:
             raise ValueError("render requires at least one prompt.")
@@ -215,7 +222,7 @@ class QwenImageEditRenderSession:
         base_seed = int(getattr(self.args, "seed", 42))
         images: List[Image.Image] = []
         if self._batch_render_supported(prompt_count=len(prompt_list)):
-            batch_size = max(2, int(getattr(self.args, "qwen_batch_size", 1)))
+            batch_size = max(2, int(self._option("batch_size", 1)))
             try:
                 for start in range(0, len(prompt_list), batch_size):
                     chunk = prompt_list[start : start + batch_size]
@@ -230,7 +237,7 @@ class QwenImageEditRenderSession:
                         )
                         continue
                     print(
-                        f"[qwen_batch] rendering {len(chunk)} prompts in one denoising batch",
+                        f"[{self.ERROR_PREFIX}_batch] rendering {len(chunk)} prompts in one denoising batch",
                         file=sys.stderr,
                     )
                     images.extend(
@@ -241,10 +248,10 @@ class QwenImageEditRenderSession:
                         )
                     )
             except Exception as exc:
-                if not bool(getattr(self.args, "qwen_batch_fallback", True)):
+                if not bool(self._option("batch_fallback", True)):
                     raise
                 print(
-                    "[qwen_batch] batch render failed; falling back to sequential render: "
+                    f"[{self.ERROR_PREFIX}_batch] batch render failed; falling back to sequential render: "
                     f"{type(exc).__name__}: {exc}",
                     file=sys.stderr,
                 )
@@ -257,7 +264,8 @@ class QwenImageEditRenderSession:
             ]
         if len(images) != len(prompt_list):
             raise RuntimeError(
-                f"Qwen Image Edit returned {len(images)} images for {len(prompt_list)} prompts."
+                f"{self.DISPLAY_NAME} returned {len(images)} images for "
+                f"{len(prompt_list)} prompts."
             )
         return [image.convert("RGB").copy() for image in images]
 
@@ -316,7 +324,7 @@ class QwenImageEditRenderSession:
         self.last_and_query_count = 0
         del cwor_result_prompt
         if self.pipe is None:
-            return [], "qwen_image_edit_session_not_initialized"
+            return [], f"{self.ERROR_PREFIX}_image_edit_session_not_initialized"
 
         prompt_items = [
             dict(item)
@@ -325,7 +333,7 @@ class QwenImageEditRenderSession:
             and self._candidate_prompt(dict(item))
         ]
         if len(prompt_items) < 2:
-            return [], "qwen_strategy_and_requires_at_least_two_prompt_candidates"
+            return [], f"{self.ERROR_PREFIX}_strategy_and_requires_at_least_two_prompt_candidates"
 
         best_by_strategy: Dict[str, Dict[str, object]] = {}
         for idx, item in enumerate(prompt_items):
@@ -352,11 +360,11 @@ class QwenImageEditRenderSession:
             unique_ranked.append(item)
         ranked = unique_ranked
         if len(ranked) < 2:
-            return [], "qwen_strategy_and_requires_multiple_strategy_candidates"
+            return [], f"{self.ERROR_PREFIX}_strategy_and_requires_multiple_strategy_candidates"
 
         query_budget = max(0, int(getattr(self.args, "_flux2_strategy_cwor_query_budget", 1)))
         if query_budget <= 0:
-            return [], "qwen_strategy_and_query_budget_exhausted"
+            return [], f"{self.ERROR_PREFIX}_strategy_and_query_budget_exhausted"
 
         cwor_target_label = getattr(self.args, "cwor_target_label", None)
         try:
@@ -403,7 +411,10 @@ class QwenImageEditRenderSession:
                 query_count = int(self.last_and_query_count)
                 for result in evaluated_results:
                     result["cwor_strategy_query_count"] = int(query_count)
-                return evaluated_results, f"qwen_strategy_and:{type(exc).__name__}:{exc}"
+                return (
+                    evaluated_results,
+                    f"{self.ERROR_PREFIX}_strategy_and:{type(exc).__name__}:{exc}",
+                )
             if not exact_artifacts:
                 evaluated_image = vlm_attack_module.classifier_input_image(
                     trial_image,
@@ -439,12 +450,12 @@ class QwenImageEditRenderSession:
                     "candidate_variant": "cwor",
                     "candidate_selected_image": trial_image.copy(),
                     **exact_artifacts,
-                    "candidate_selected_image_source": "qwen_strategy_and",
+                    "candidate_selected_image_source": f"{self.ERROR_PREFIX}_strategy_and",
                     "cwor_strategy_merge_mode": "and",
                     "cwor_strategy_components": components,
                     "cwor_strategy_query_offset": int(query_count),
-                    "qwen_strategy_and_original_objective": original_objective,
-                    "qwen_strategy_and_base_confidence": cwor_base_confidence,
+                    f"{self.ERROR_PREFIX}_strategy_and_original_objective": original_objective,
+                    f"{self.ERROR_PREFIX}_strategy_and_base_confidence": cwor_base_confidence,
                 }
             )
             if trial_objective > current_objective:
@@ -454,11 +465,15 @@ class QwenImageEditRenderSession:
                 accepted_count += 1
 
         if query_count <= 0:
-            return [], "qwen_strategy_and_no_merge_trial_executed"
+            return [], f"{self.ERROR_PREFIX}_strategy_and_no_merge_trial_executed"
         for result in evaluated_results:
             result["cwor_strategy_query_count"] = int(query_count)
-            result["qwen_strategy_and_accepted_component_count"] = int(accepted_count)
-            result["qwen_strategy_and_attempted_prompts"] = list(attempted_prompts)
+            result[f"{self.ERROR_PREFIX}_strategy_and_accepted_component_count"] = int(
+                accepted_count
+            )
+            result[f"{self.ERROR_PREFIX}_strategy_and_attempted_prompts"] = list(
+                attempted_prompts
+            )
         return evaluated_results, None
 
     def reset_cwor_aggregate_state(self) -> None:
@@ -484,6 +499,14 @@ class QwenImageEditRenderSession:
 
 
 class Qwen2AttackRuntimeAdapter:
+    MODEL_ID = QwenImageEditRenderSession.MODEL_ID
+    MODEL_FAMILY = QwenImageEditRenderSession.MODEL_FAMILY
+    DISPLAY_NAME = QwenImageEditRenderSession.DISPLAY_NAME
+    OPTION_PREFIX = QwenImageEditRenderSession.OPTION_PREFIX
+    ERROR_PREFIX = QwenImageEditRenderSession.ERROR_PREFIX
+    STRATEGY_AND_FLAG = "qwen_strategy_and_enable"
+    SESSION_CLASS = QwenImageEditRenderSession
+
     def __init__(self) -> None:
         self._module = None
         self._runtime_cache = None
@@ -498,33 +521,38 @@ class Qwen2AttackRuntimeAdapter:
             self._module = vlm_attack_module
         return self._module
 
-    @staticmethod
-    def _ensure_qwen_args(args) -> None:
+    @classmethod
+    def _ensure_qwen_args(cls, args) -> None:
         if not hasattr(args, "model_path") or not str(getattr(args, "model_path", "") or "").strip():
-            setattr(args, "model_path", "Qwen/Qwen-Image-Edit-2511")
+            setattr(args, "model_path", cls.MODEL_ID)
         if not hasattr(args, "cpu_offload"):
             setattr(args, "cpu_offload", False)
-        if not hasattr(args, "qwen_true_cfg_scale"):
-            setattr(args, "qwen_true_cfg_scale", 4.0)
-        if not hasattr(args, "qwen_negative_prompt"):
-            setattr(args, "qwen_negative_prompt", " ")
-        if not hasattr(args, "qwen_num_images_per_prompt"):
-            setattr(args, "qwen_num_images_per_prompt", 1)
-        if int(getattr(args, "qwen_num_images_per_prompt", 1)) != 1:
-            raise ValueError("Qwen Image Edit attack runtime requires one image per prompt")
-        if not hasattr(args, "qwen_batch_size"):
-            setattr(args, "qwen_batch_size", 1)
-        if int(getattr(args, "qwen_batch_size", 1)) < 1:
-            raise ValueError("Qwen Image Edit qwen_batch_size must be >= 1")
-        if not hasattr(args, "qwen_batch_fallback"):
-            setattr(args, "qwen_batch_fallback", True)
+        option_defaults = {
+            "true_cfg_scale": 4.0,
+            "negative_prompt": " ",
+            "num_images_per_prompt": 1,
+            "batch_size": 1,
+            "batch_fallback": True,
+        }
+        for suffix, default in option_defaults.items():
+            option_name = f"{cls.OPTION_PREFIX}_{suffix}"
+            if not hasattr(args, option_name):
+                setattr(args, option_name, default)
+        image_count_name = f"{cls.OPTION_PREFIX}_num_images_per_prompt"
+        if int(getattr(args, image_count_name, 1)) != 1:
+            raise ValueError(f"{cls.DISPLAY_NAME} attack runtime requires one image per prompt")
+        batch_size_name = f"{cls.OPTION_PREFIX}_batch_size"
+        if int(getattr(args, batch_size_name, 1)) < 1:
+            raise ValueError(f"{cls.DISPLAY_NAME} {batch_size_name} must be >= 1")
         if not hasattr(args, "gcg_scene_vocab_prompts_per_strategy"):
             setattr(args, "gcg_scene_vocab_prompts_per_strategy", 0)
         if not hasattr(args, "gcg_scene_vocab_enabled_strategies"):
             setattr(args, "gcg_scene_vocab_enabled_strategies", "all")
 
-    @staticmethod
-    def _render_session_rebuild_required(*, render_session, args, has_input_image: bool) -> bool:
+    @classmethod
+    def _render_session_rebuild_required(
+        cls, *, render_session, args, has_input_image: bool
+    ) -> bool:
         if render_session is None:
             return True
         if bool(getattr(render_session, "has_input_image", False)) != bool(has_input_image):
@@ -537,9 +565,9 @@ class Qwen2AttackRuntimeAdapter:
             "hf_token",
             "device",
             "cpu_offload",
-            "qwen_true_cfg_scale",
-            "qwen_negative_prompt",
-            "qwen_num_images_per_prompt",
+            f"{cls.OPTION_PREFIX}_true_cfg_scale",
+            f"{cls.OPTION_PREFIX}_negative_prompt",
+            f"{cls.OPTION_PREFIX}_num_images_per_prompt",
         )
         for key in static_keys:
             if str(getattr(prev_args, key, "")) != str(getattr(args, key, "")):
@@ -548,14 +576,18 @@ class Qwen2AttackRuntimeAdapter:
 
     def setup(self, *, args, has_input_image: bool) -> None:
         self._ensure_qwen_args(args)
-        validate_generator_model(args.model_path, expected_family="qwen-image-edit")
+        validate_generator_model(args.model_path, expected_family=self.MODEL_FAMILY)
         attack_mode = str(getattr(args, "attack_mode", "vlm") or "vlm").strip().lower()
         if attack_mode not in {"vlm", "and"}:
-            raise ValueError(f"Qwen Image Edit runtime does not support attack_mode={attack_mode}")
+            raise ValueError(
+                f"{self.DISPLAY_NAME} runtime does not support attack_mode={attack_mode}"
+            )
         if bool(getattr(args, "cwor_enable", False)) and not bool(
-            getattr(args, "qwen_strategy_and_enable", False)
+            getattr(args, self.STRATEGY_AND_FLAG, False)
         ):
-            raise ValueError("Qwen Image Edit runner supports CWOR only through attack_mode=and.")
+            raise ValueError(
+                f"{self.DISPLAY_NAME} runner supports CWOR only through attack_mode=and."
+            )
 
         module = self._get_module()
         if self._runtime_cache is None:
@@ -572,7 +604,7 @@ class Qwen2AttackRuntimeAdapter:
                     self._render_session.close()
                 except Exception:
                     pass
-            self._render_session = QwenImageEditRenderSession(
+            self._render_session = self.SESSION_CLASS(
                 args=args,
                 has_input_image=bool(has_input_image),
             )
@@ -632,7 +664,7 @@ class Qwen2AttackRuntimeAdapter:
     def evaluate_and_candidate(self, **_kwargs):
         if self._render_session is None:
             self.last_and_query_count = 0
-            return [], "qwen_image_edit_session_not_initialized"
+            return [], f"{self.ERROR_PREFIX}_image_edit_session_not_initialized"
         result = self._render_session.evaluate_and_candidate(**_kwargs)
         self.last_and_query_count = int(self._render_session.last_and_query_count)
         return result
