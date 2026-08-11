@@ -2659,6 +2659,9 @@ class AttackModeRefactorTests(unittest.TestCase):
         and_all = (
             ISOLATED_ROOT / "run_firered_vlm_res_clean_correct_full_and_all.sh"
         ).read_text(encoding="utf-8")
+        first_clean100 = (
+            ISOLATED_ROOT / "run_firered_vlm_res_first_clean100.sh"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("requirements-faas.txt", bootstrap)
         self.assertIn("FireRedTeam/FireRed-Image-Edit-1.1", bootstrap)
@@ -2678,6 +2681,19 @@ class AttackModeRefactorTests(unittest.TestCase):
         self.assertIn("--gcg_scene_vocab_enabled_strategies none", vlm_none)
         self.assertIn("--attack_mode and", and_all)
         self.assertIn("--gcg_scene_vocab_enabled_strategies all", and_all)
+
+        self.assertIn('CLEAN_COUNT="${CLEAN_CORRECT_COUNT:-100}"', first_clean100)
+        self.assertIn('GENERATION_SEED="${MANUAL_SEED:-49}"', first_clean100)
+        self.assertIn("--attack_only_clean_correct true", first_clean100)
+        self.assertIn("--clean_correct_sample_size 0", first_clean100)
+        self.assertIn("--clean_correct_skip 0", first_clean100)
+        self.assertIn('--clean_correct_count "$CLEAN_COUNT"', first_clean100)
+        self.assertNotIn("--clean_correct_sample_seed", first_clean100)
+        self.assertIn("--attack_mode vlm", first_clean100)
+        self.assertIn(
+            "--gcg_scene_vocab_enabled_strategies none",
+            first_clean100,
+        )
 
     def test_qwen_launcher_forwards_clean_correct_window_options(self) -> None:
         launcher = (ISOLATED_ROOT / "run_vlm_attack.sh").read_text(encoding="utf-8")
