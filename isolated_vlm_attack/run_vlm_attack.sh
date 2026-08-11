@@ -21,11 +21,25 @@ fi
 # The default path is intentionally a supported FLUX.2 Klein configuration.
 CONFIG_DEFAULT="configs/flux2_vlm_attack_nips.yaml"
 CONFIG_PATH="${CONFIG:-$CONFIG_DEFAULT}"
+CONFIG_PATH_EXPLICIT=0
+RUN_NAME_EXPLICIT=0
+WANDB_PROJECT_EXPLICIT=0
+[[ -n "${CONFIG:-}" ]] && CONFIG_PATH_EXPLICIT=1
+[[ -n "${RUN_NAME:-}" ]] && RUN_NAME_EXPLICIT=1
+[[ -n "${WANDB_PROJECT:-}" ]] && WANDB_PROJECT_EXPLICIT=1
 HF_TOKEN_ENV_NAME="${HF_TOKEN_ENV_NAME:-}"
 MODEL_PATH_EXPLICIT=0
 if [[ -n "${MODEL_PATH:-}" ]]; then
   MODEL_PATH_EXPLICIT=1
 fi
+MANUAL_SEED_EXPLICIT=0
+NUM_INFERENCE_STEPS_EXPLICIT=0
+HEIGHT_EXPLICIT=0
+WIDTH_EXPLICIT=0
+[[ -n "${MANUAL_SEED:-}" ]] && MANUAL_SEED_EXPLICIT=1
+[[ -n "${NUM_INFERENCE_STEPS:-}" ]] && NUM_INFERENCE_STEPS_EXPLICIT=1
+[[ -n "${HEIGHT:-}" ]] && HEIGHT_EXPLICIT=1
+[[ -n "${WIDTH:-}" ]] && WIDTH_EXPLICIT=1
 
 set_from_config() {
   local var_name="$1"
@@ -58,9 +72,11 @@ while [[ $i -lt ${#RAW_ARGS[@]} ]]; do
       i=$((i + 1))
       require_cli_value --config "$i" "${#RAW_ARGS[@]}"
       CONFIG_PATH="${RAW_ARGS[$i]}"
+      CONFIG_PATH_EXPLICIT=1
       ;;
     --config=*)
       CONFIG_PATH="${arg#--config=}"
+      CONFIG_PATH_EXPLICIT=1
       ;;
     --runner|--runner_variant)
       i=$((i + 1))
@@ -90,9 +106,11 @@ while [[ $i -lt ${#RAW_ARGS[@]} ]]; do
       i=$((i + 1))
       require_cli_value --run_name "$i" "${#RAW_ARGS[@]}"
       RUN_NAME="${RAW_ARGS[$i]}"
+      RUN_NAME_EXPLICIT=1
       ;;
     --run_name=*)
       RUN_NAME="${arg#--run_name=}"
+      RUN_NAME_EXPLICIT=1
       ;;
     --model_path)
       i=$((i + 1))
@@ -129,6 +147,16 @@ while [[ $i -lt ${#RAW_ARGS[@]} ]]; do
   i=$((i + 1))
 done
 set -- "${FORWARD_ARGS[@]}"
+
+# Selecting FireRed without an explicit config should load its own preset,
+# rather than inheriting unrelated FLUX run metadata and generation values.
+if [[ "$CONFIG_PATH_EXPLICIT" == "0" ]]; then
+  case "${RUNNER_VARIANT:-}" in
+    firered|firered_image_edit|firered-image-edit)
+      CONFIG_PATH="configs/firered_vlm_attack_nips.yaml"
+      ;;
+  esac
+fi
 
 if [[ -n "$CONFIG_PATH" && "$CONFIG_PATH" != /* ]]; then
   CONFIG_PATH="$ROOT_DIR/$CONFIG_PATH"
@@ -275,6 +303,12 @@ mapping = {
     "qwen_num_images_per_prompt": "QWEN_NUM_IMAGES_PER_PROMPT",
     "qwen_batch_size": "QWEN_BATCH_SIZE",
     "qwen_batch_fallback": "QWEN_BATCH_FALLBACK",
+    # FireRed Image Edit.
+    "firered_true_cfg_scale": "FIRERED_TRUE_CFG_SCALE",
+    "firered_negative_prompt": "FIRERED_NEGATIVE_PROMPT",
+    "firered_num_images_per_prompt": "FIRERED_NUM_IMAGES_PER_PROMPT",
+    "firered_batch_size": "FIRERED_BATCH_SIZE",
+    "firered_batch_fallback": "FIRERED_BATCH_FALLBACK",
     # Bernini.
     "bernini_root": "BERNINI_ROOT",
     "bernini_config": "BERNINI_CONFIG",
@@ -344,18 +378,19 @@ case "${RUNNER_VARIANT,,}" in
   "") ;;
   flux2|flux2_klein) RUNNER_SCRIPT="flux2_attack_runner.py" ;;
   qwen2|qwen2_image_edit|qwen-image-edit) RUNNER_SCRIPT="qwen2_attack_runner.py" ;;
+  firered|firered_image_edit|firered-image-edit) RUNNER_SCRIPT="firered_attack_runner.py" ;;
   bernini) RUNNER_SCRIPT="bernini_attack_runner.py" ;;
   *)
-    echo "ERROR: runner must be one of: flux2, qwen2, bernini (got '$RUNNER_VARIANT')." >&2
+    echo "ERROR: runner must be one of: flux2, qwen2, firered, bernini (got '$RUNNER_VARIANT')." >&2
     exit 1
     ;;
 esac
 RUNNER_SCRIPT="${RUNNER_SCRIPT:-flux2_attack_runner.py}"
 case "$RUNNER_SCRIPT" in
-  flux2_attack_runner.py|qwen2_attack_runner.py|bernini_attack_runner.py) ;;
+  flux2_attack_runner.py|qwen2_attack_runner.py|firered_attack_runner.py|bernini_attack_runner.py) ;;
   *)
     echo "ERROR: runner script is not allowed: $RUNNER_SCRIPT" >&2
-    echo "Allowed: flux2_attack_runner.py, qwen2_attack_runner.py, bernini_attack_runner.py" >&2
+    echo "Allowed: flux2_attack_runner.py, qwen2_attack_runner.py, firered_attack_runner.py, bernini_attack_runner.py" >&2
     exit 1
     ;;
 esac
@@ -444,6 +479,27 @@ case "$RUNNER_SCRIPT" in
     fi
     RUNNER_LABEL="qwen2"
     ;;
+  firered_attack_runner.py)
+    MODEL_PATH="${MODEL_PATH:-FireRedTeam/FireRed-Image-Edit-1.1}"
+    model_token="${MODEL_PATH,,}"
+    if [[ "$model_token" != "fireredteam/firered-image-edit-1.1" ]]; then
+      if [[ "$USING_DEFAULT_CONFIG" == "1" && "$MODEL_PATH_EXPLICIT" == "0" ]]; then
+        MODEL_PATH="FireRedTeam/FireRed-Image-Edit-1.1"
+      else
+        echo "ERROR: firered runner requires model_path=FireRedTeam/FireRed-Image-Edit-1.1 (got '$MODEL_PATH')." >&2
+        exit 1
+      fi
+    fi
+    if [[ "$USING_DEFAULT_CONFIG" == "1" ]]; then
+      [[ "$MANUAL_SEED_EXPLICIT" == "1" ]] || MANUAL_SEED="49"
+      [[ "$NUM_INFERENCE_STEPS_EXPLICIT" == "1" ]] || NUM_INFERENCE_STEPS="40"
+      [[ "$HEIGHT_EXPLICIT" == "1" ]] || HEIGHT="1024"
+      [[ "$WIDTH_EXPLICIT" == "1" ]] || WIDTH="1024"
+      [[ "$RUN_NAME_EXPLICIT" == "1" ]] || RUN_NAME="auto"
+      [[ "$WANDB_PROJECT_EXPLICIT" == "1" ]] || WANDB_PROJECT="firered_image_edit_attack"
+    fi
+    RUNNER_LABEL="firered"
+    ;;
   bernini_attack_runner.py)
     MODEL_PATH="${MODEL_PATH:-bernini}"
     if [[ "${MODEL_PATH,,}" != "bernini" ]]; then
@@ -503,7 +559,7 @@ if [[ "$ATTACK_MODE" == "and" ]]; then
     GCG_SCENE_VOCAB_PROMPTS_PER_STRATEGY="1"
   fi
 elif [[ -z "$GCG_CANDIDATE_SOURCE" ]]; then
-  if [[ "$RUNNER_SCRIPT" == "qwen2_attack_runner.py" ]]; then
+  if [[ "$RUNNER_SCRIPT" == "qwen2_attack_runner.py" || "$RUNNER_SCRIPT" == "firered_attack_runner.py" ]]; then
     GCG_CANDIDATE_SOURCE="gemma_scene_vocab"
   else
     GCG_CANDIDATE_SOURCE="vlm_query"
@@ -592,7 +648,7 @@ fi
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Usage:
-  ./isolated_vlm_attack/run_vlm_attack.sh [--config FILE] [--runner flux2|qwen2|bernini] [runner arguments]
+  ./isolated_vlm_attack/run_vlm_attack.sh [--config FILE] [--runner flux2|qwen2|firered|bernini] [runner arguments]
 
 Supported attack modes:
   --attack_mode vlm|and
@@ -613,6 +669,8 @@ Core environment overrides:
   GCG_EVAL_NATURALNESS_ON_ATTACK_SUCCESS, GCG_EVAL_NATURALNESS_LLM_THINKING
   HEIGHT, WIDTH, NUM_INFERENCE_STEPS, MAX_SEQUENCE_LENGTH
   GUIDANCE_SCALE, CPU_OFFLOAD
+  FIRERED_TRUE_CFG_SCALE, FIRERED_NEGATIVE_PROMPT
+  FIRERED_NUM_IMAGES_PER_PROMPT, FIRERED_BATCH_SIZE, FIRERED_BATCH_FALLBACK
   HF_TOKEN, HF_TOKEN_FILE, HF_TOKEN_ENV_NAME, HF_CACHE_ROOT
   WANDB_ENABLE, WANDB_PROJECT, WANDB_ENTITY, WANDB_GROUP, WANDB_TAGS
   WANDB_MODE, WANDB_LOG_EVERY, WANDB_API_KEY, WANDB_API_KEY_FILE
@@ -728,6 +786,15 @@ case "$RUNNER_SCRIPT" in
     append_optional QWEN_NUM_IMAGES_PER_PROMPT --qwen_num_images_per_prompt
     append_optional QWEN_BATCH_SIZE --qwen_batch_size
     append_optional QWEN_BATCH_FALLBACK --qwen_batch_fallback
+    ;;
+  firered_attack_runner.py)
+    append_optional CLEAN_CORRECT_SKIP --clean_correct_skip
+    append_optional CLEAN_CORRECT_COUNT --clean_correct_count
+    append_optional FIRERED_TRUE_CFG_SCALE --firered_true_cfg_scale
+    append_optional FIRERED_NEGATIVE_PROMPT --firered_negative_prompt
+    append_optional FIRERED_NUM_IMAGES_PER_PROMPT --firered_num_images_per_prompt
+    append_optional FIRERED_BATCH_SIZE --firered_batch_size
+    append_optional FIRERED_BATCH_FALLBACK --firered_batch_fallback
     ;;
   bernini_attack_runner.py)
     CMD+=(--clean_correct_sample_size "$CLEAN_CORRECT_SAMPLE_SIZE")
